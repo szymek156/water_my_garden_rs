@@ -1,3 +1,12 @@
+#[derive(Debug)]
+#[toml_cfg::toml_config]
+pub struct Config {
+    #[default("NOT SET")]
+    wifi_ssid: &'static str,
+    #[default("NOT SET")]
+    wifi_psk: &'static str,
+}
+
 fn main() {
     // It is necessary to call this function once. Otherwise some patches to the runtime
     // implemented by esp-idf-sys might not link properly. See https://github.com/esp-rs/esp-idf-template/issues/71
@@ -5,6 +14,10 @@ fn main() {
 
     // Bind the log crate to the ESP Logging facilities
     esp_idf_svc::log::EspLogger::initialize_default();
+
+    let app_config = CONFIG;
+
+    log::info!("WiFi creds: {app_config:#?}");
 
     say_hello();
 
