@@ -1,5 +1,8 @@
 # source of truth
 https://docs.esp-rs.org/book/writing-your-own-application/
+https://docs.esp-rs.org/std-training/
+https://docs.esp-rs.org/no_std-training/
+community on matrix https://matrix.to/#/#esp-rs:matrix.org
 
 # troubleshooting
 ## Cannot flash
