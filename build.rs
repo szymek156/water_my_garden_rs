@@ -6,7 +6,6 @@ pub struct Config {
     wifi_psk: &'static str,
 }
 
-
 fn main() {
     // Check if the `cfg.toml` file exists and has been filled out.
     if !std::path::Path::new("cfg.toml").exists() {
