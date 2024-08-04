@@ -36,6 +36,8 @@ log = { version = "0.4", default-features = false }
 esp-idf-svc = { version = "0.49", default-features = false }
 toml-cfg = "=0.2.0"
 anyhow = "1.0.86"
+enum-iterator = "2.1.0"
+ds323x = "0.5.1"
 
 [build-dependencies]
 embuild = "0.32.0"

@@ -1,10 +1,16 @@
 mod wifi;
 
-use std::{thread::sleep, time::Duration};
+use anyhow::Result;
+
+use enum_iterator::Sequence;
+use esp_idf_svc::hal::gpio::Output;
 
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
-    hal::prelude::Peripherals,
+    hal::{
+        gpio::{Gpio14, Gpio26, Gpio27, Gpio33, PinDriver, Pins},
+        prelude::Peripherals,
+    },
     http::{
         server::{Configuration, EspHttpServer},
         Method,
@@ -12,6 +18,7 @@ use esp_idf_svc::{
     io::Write as _,
 };
 
+use std::{thread::sleep, time::Duration};
 use wifi::connect_to_wifi;
 
 #[derive(Debug)]
@@ -37,7 +44,7 @@ fn main() {
     log::info!("WiFi creds: {}", app_config.wifi_ssid);
 
     let sysloop = EspSystemEventLoop::take().expect("Cannot take SystemEventLoop");
-    let peripherals = Peripherals::take().expect("Cannot take peripherials");
+    let peripherals = Peripherals::take().expect("Cannot take peripherals");
 
     // Connect to the Wi-Fi network
     let _wifi = connect_to_wifi(
@@ -51,8 +58,61 @@ fn main() {
     // Set the HTTP server
     let _http_server = setup_http_server();
 
+    let mut sections = Sections::new(peripherals.pins).expect("Failed to setup GPIO");
+
+    // let i2c = peripherals.i2c0;
+    // let sda = peripherals.pins.gpio21;
+    // let scl = peripherals.pins.gpio22;
+    // TODO: INT pin GPIO23
+
+    // let config = I2cConfig::new().baudrate(400.kHz().into());
+    // let mut i2c_dev = I2cDriver::new(i2c, sda, scl, &config).expect("Failed to create I2C driver");
+    // let rtc = Ds323x::new_ds3231(i2c_dev);
+
     loop {
         sleep(Duration::from_millis(1000));
+        log::info!("Toggle pins");
+        sections.flowers.toggle().unwrap();
+        sections.terrace.toggle().unwrap();
+        sections.grass.toggle().unwrap();
+        sections.vegs.toggle().unwrap();
+    }
+}
+
+#[derive(Debug, PartialEq, Sequence)]
+enum CurrentSection {
+    Vegs,
+    Flowers,
+    Grass,
+    Terrace,
+    None,
+}
+
+struct Sections {
+    vegs: PinDriver<'static, Gpio14, Output>,
+    terrace: PinDriver<'static, Gpio26, Output>,
+    flowers: PinDriver<'static, Gpio27, Output>,
+    grass: PinDriver<'static, Gpio33, Output>,
+
+    current_section: CurrentSection,
+}
+
+impl Sections {
+    fn new(pins: Pins) -> Result<Self> {
+        let mut sections = Self {
+            vegs: PinDriver::output(pins.gpio14)?,
+            terrace: PinDriver::output(pins.gpio26)?,
+            flowers: PinDriver::output(pins.gpio27)?,
+            grass: PinDriver::output(pins.gpio33)?,
+            current_section: CurrentSection::None,
+        };
+
+        sections.vegs.set_low()?;
+        sections.flowers.set_low()?;
+        sections.terrace.set_low()?;
+        sections.grass.set_low()?;
+
+        Ok(sections)
     }
 }
 

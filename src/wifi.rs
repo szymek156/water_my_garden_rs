@@ -11,7 +11,7 @@ pub fn connect_to_wifi(
     pass: &str,
     modem: impl peripheral::Peripheral<P = esp_idf_svc::hal::modem::Modem> + 'static,
     sysloop: EspSystemEventLoop,
-) -> Result<Box<EspWifi<'static>>> {
+) -> Result<EspWifi<'static>> {
     let mut auth_method = AuthMethod::WPA2Personal;
     if ssid.is_empty() {
         bail!("Missing WiFi name")
@@ -71,5 +71,5 @@ pub fn connect_to_wifi(
 
     info!("Wifi DHCP info: {:?}", ip_info);
 
-    Ok(Box::new(esp_wifi))
+    Ok(esp_wifi)
 }
