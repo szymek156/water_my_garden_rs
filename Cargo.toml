@@ -38,6 +38,7 @@ toml-cfg = "=0.2.0"
 anyhow = "1.0.86"
 enum-iterator = "2.1.0"
 ds323x = "0.5.1"
+chrono = "0.4.38"
 
 [build-dependencies]
 embuild = "0.32.0"
