@@ -1,26 +1,17 @@
+mod clock;
 mod wifi;
 
-use anyhow::anyhow;
 use anyhow::Result;
-use chrono::TimeDelta;
-use ds323x::ic::DS3231;
-use ds323x::interface::I2cInterface;
-use ds323x::DateTimeAccess;
-use ds323x::Ds323x;
 
-use ds323x::NaiveDateTime;
+use clock::RTCClock;
+
 use enum_iterator::Sequence;
-use esp_idf_svc::hal::gpio::{InputPin, Output, OutputPin};
+use esp_idf_svc::hal::gpio::{Output, OutputPin};
 
-use esp_idf_svc::hal::i2c::{I2c, I2cConfig, I2cDriver};
 use esp_idf_svc::hal::peripheral::Peripheral;
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
-    hal::{
-        gpio::PinDriver,
-        prelude::*,
-        task::notification::{Notification, Notifier},
-    },
+    hal::{gpio::PinDriver, prelude::*},
     http::{
         server::{Configuration, EspHttpServer},
         Method,
@@ -28,10 +19,6 @@ use esp_idf_svc::{
     io::Write as _,
 };
 
-use std::num::NonZeroU32;
-use std::sync::atomic::AtomicU32;
-use std::sync::atomic::Ordering;
-use std::sync::mpsc::channel;
 use std::{thread::sleep, time::Duration};
 
 #[derive(Debug)]
@@ -79,56 +66,15 @@ fn main() {
     )
     .expect("Failed to setup GPIO");
 
-    let mut rtc_clock = RTCClock::new(
+    let rtc_clock = RTCClock::new(
         peripherals.pins.gpio21,
         peripherals.pins.gpio22,
+        peripherals.pins.gpio23,
         peripherals.i2c0,
     )
     .expect("Unable to create RTC clock");
 
-    // This is a thin wrapper over the FreeRTOS task
-    std::thread::spawn(move || {
-        log::info!("Hello From int handling thread!");
-
-        // int_pin:23
-        let mut int_pin = PinDriver::input(peripherals.pins.gpio23).unwrap();
-
-        log::info!("int level: {:?}", int_pin.get_level());
-
-        // INT pin on RTC is high by default, listen on falling edge
-        int_pin
-            .set_interrupt_type(esp_idf_svc::hal::gpio::InterruptType::NegEdge)
-            .unwrap();
-        int_pin
-            .set_pull(esp_idf_svc::hal::gpio::Pull::Down)
-            .unwrap();
-
-        let notification = Notification::new();
-        let notifier = notification.notifier();
-
-        unsafe {
-            int_pin
-                .subscribe(move || {
-                    static mut INT_COUNT: u32 = 1;
-
-                    notifier.notify_and_yield(NonZeroU32::new(INT_COUNT).unwrap());
-
-                    INT_COUNT += 1;
-                })
-                .unwrap()
-        };
-
-        int_pin.enable_interrupt().unwrap();
-
-        while let Some(msg) = notification.wait(esp_idf_svc::hal::delay::BLOCK) {
-            log::info!("Got interrupt notification! #{msg}");
-
-            int_pin.enable_interrupt().unwrap();
-        }
-    });
-    // unsafe { int_pin.subscribe(handle_interrupt).unwrap() };
-
-    rtc_clock.test_arming_alarm();
+    rtc_clock.start();
 
     loop {
         sleep(Duration::from_millis(1000));
@@ -137,91 +83,6 @@ fn main() {
         sections.terrace.toggle().unwrap();
         sections.grass.toggle().unwrap();
         sections.vegs.toggle().unwrap();
-
-        log::info!(
-            "alarm1 matched {} ",
-            rtc_clock.rtc.has_alarm1_matched().unwrap()
-        );
-        log::info!(
-            "alarm2 matched {} ",
-            rtc_clock.rtc.has_alarm2_matched().unwrap()
-        );
-
-        if rtc_clock.rtc.has_alarm1_matched().unwrap() {
-            rtc_clock.test_arming_alarm();
-            rtc_clock.rtc.clear_alarm1_matched_flag().unwrap();
-        }
-
-
-
-        log::info!("{}", rtc_clock.get_current_datetime().unwrap());
-        // log::info!("int level: {:?}", int_pin.get_level());
-    }
-}
-
-struct RTCClock {
-    rtc: Ds323x<I2cInterface<I2cDriver<'static>>, DS3231>,
-}
-
-impl RTCClock {
-    fn new(
-        sda_pin: impl Peripheral<P = impl OutputPin + InputPin> + 'static,
-        scl_pin: impl Peripheral<P = impl OutputPin + InputPin> + 'static,
-        i2c: impl Peripheral<P = impl I2c> + 'static,
-    ) -> Result<Self> {
-        // TODO: INT pin GPIO23
-        let config = I2cConfig::new().baudrate(400.kHz().into());
-        let i2c_dev = I2cDriver::new(i2c, sda_pin, scl_pin, &config)?;
-
-        let mut rtc = Ds323x::new_ds3231(i2c_dev);
-
-        rtc.disable_32khz_output()
-            .map_err(|e| anyhow!("Cannot disable 32khz output {e:?}"))?;
-
-        rtc.disable_square_wave()
-            .map_err(|e| anyhow!("Cannot disable square wave {e:?}"))?;
-
-        rtc.use_int_sqw_output_as_interrupt()
-            .map_err(|e| anyhow!("Cannot set sqw as interrupt {e:?}"))?;
-
-        rtc.disable_alarm1_interrupts()
-            .map_err(|e| anyhow!("Cannot disable alarm1 INT {e:?}"))?;
-        rtc.disable_alarm2_interrupts()
-            .map_err(|e| anyhow!("Cannot disable alarm2 INT {e:?}"))?;
-        Ok(Self { rtc })
-    }
-
-    fn get_current_datetime(&mut self) -> Result<NaiveDateTime> {
-        // TODO: since wifi is connected, NTP for the clock
-        let datetime = self
-            .rtc
-            .datetime()
-            .map_err(|e| anyhow!("Failed to read current datetime {e:?}"))?;
-
-        Ok(datetime)
-    }
-
-    fn get_temperature(&mut self) -> Result<f32> {
-        let temp = self
-            .rtc
-            .temperature()
-            .map_err(|e| anyhow!("Failed to read temperature {e:?}"))?;
-        Ok(temp)
-    }
-
-    fn test_arming_alarm(&mut self) {
-        let now = self.get_current_datetime().unwrap();
-        let future = now
-            .checked_add_signed(TimeDelta::new(5, 0).unwrap())
-            .unwrap();
-
-        log::info!(
-            "setting alarm {} -> {future}",
-            self.get_current_datetime().unwrap()
-        );
-
-        self.rtc.set_alarm1_hms(future.time()).unwrap();
-        self.rtc.enable_alarm1_interrupts().unwrap();
     }
 }
 
