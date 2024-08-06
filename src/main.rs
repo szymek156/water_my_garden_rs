@@ -16,7 +16,11 @@ use esp_idf_svc::hal::i2c::{I2c, I2cConfig, I2cDriver};
 use esp_idf_svc::hal::peripheral::Peripheral;
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
-    hal::{gpio::PinDriver, prelude::*},
+    hal::{
+        gpio::PinDriver,
+        prelude::*,
+        task::notification::{Notification, Notifier},
+    },
     http::{
         server::{Configuration, EspHttpServer},
         Method,
@@ -24,8 +28,10 @@ use esp_idf_svc::{
     io::Write as _,
 };
 
+use std::num::NonZeroU32;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc::channel;
 use std::{thread::sleep, time::Duration};
 
 #[derive(Debug)]
@@ -80,25 +86,47 @@ fn main() {
     )
     .expect("Unable to create RTC clock");
 
-    // int_pin:23
-    let mut int_pin = PinDriver::input(peripherals.pins.gpio23).unwrap();
+    // This is a thin wrapper over the FreeRTOS task
+    std::thread::spawn(move || {
+        log::info!("Hello From int handling thread!");
 
-    log::info!("int level: {:?}", int_pin.get_level());
+        // int_pin:23
+        let mut int_pin = PinDriver::input(peripherals.pins.gpio23).unwrap();
 
-    // INT pin on RTC is high by default, listen on falling edge
-    int_pin
-        .set_interrupt_type(esp_idf_svc::hal::gpio::InterruptType::NegEdge)
-        .unwrap();
-    int_pin
-        .set_pull(esp_idf_svc::hal::gpio::Pull::Down)
-        .unwrap();
+        log::info!("int level: {:?}", int_pin.get_level());
 
-    unsafe { int_pin.subscribe(handle_interrupt).unwrap() };
+        // INT pin on RTC is high by default, listen on falling edge
+        int_pin
+            .set_interrupt_type(esp_idf_svc::hal::gpio::InterruptType::NegEdge)
+            .unwrap();
+        int_pin
+            .set_pull(esp_idf_svc::hal::gpio::Pull::Down)
+            .unwrap();
 
-    let mut old_int_cnt = INT_COUNT.load(Ordering::Relaxed);
+        let notification = Notification::new();
+        let notifier = notification.notifier();
 
-    int_pin.enable_interrupt().unwrap();
-    log::info!("interrupts handled {}", INT_COUNT.load(Ordering::Relaxed));
+        unsafe {
+            int_pin
+                .subscribe(move || {
+                    static mut INT_COUNT: u32 = 1;
+
+                    notifier.notify_and_yield(NonZeroU32::new(INT_COUNT).unwrap());
+
+                    INT_COUNT += 1;
+                })
+                .unwrap()
+        };
+
+        int_pin.enable_interrupt().unwrap();
+
+        while let Some(msg) = notification.wait(esp_idf_svc::hal::delay::BLOCK) {
+            log::info!("Got interrupt notification! #{msg}");
+
+            int_pin.enable_interrupt().unwrap();
+        }
+    });
+    // unsafe { int_pin.subscribe(handle_interrupt).unwrap() };
 
     rtc_clock.test_arming_alarm();
 
@@ -110,25 +138,25 @@ fn main() {
         sections.grass.toggle().unwrap();
         sections.vegs.toggle().unwrap();
 
+        log::info!(
+            "alarm1 matched {} ",
+            rtc_clock.rtc.has_alarm1_matched().unwrap()
+        );
+        log::info!(
+            "alarm2 matched {} ",
+            rtc_clock.rtc.has_alarm2_matched().unwrap()
+        );
 
-        if INT_COUNT.load(Ordering::Relaxed) != old_int_cnt {
-            log::info!("reenable interrupt",);
-            int_pin.enable_interrupt().unwrap();
-            old_int_cnt = INT_COUNT.load(Ordering::Relaxed);
+        if rtc_clock.rtc.has_alarm1_matched().unwrap() {
+            rtc_clock.test_arming_alarm();
+            rtc_clock.rtc.clear_alarm1_matched_flag().unwrap();
         }
-        log::info!("alarm1 matched {} ", rtc_clock.rtc.has_alarm1_matched().unwrap());
-        log::info!("alarm2 matched {} ", rtc_clock.rtc.has_alarm2_matched().unwrap());
-        rtc_clock.rtc.clear_alarm1_matched_flag().unwrap();
+
+
 
         log::info!("{}", rtc_clock.get_current_datetime().unwrap());
-        log::info!("interrupts handled {}", INT_COUNT.load(Ordering::Relaxed));
-        log::info!("int level: {:?}", int_pin.get_level());
+        // log::info!("int level: {:?}", int_pin.get_level());
     }
-}
-
-static INT_COUNT: AtomicU32 = AtomicU32::new(0);
-fn handle_interrupt() {
-    INT_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 struct RTCClock {
@@ -182,7 +210,6 @@ impl RTCClock {
     }
 
     fn test_arming_alarm(&mut self) {
-        log::info!("interrupts handled {}", INT_COUNT.load(Ordering::Relaxed));
         let now = self.get_current_datetime().unwrap();
         let future = now
             .checked_add_signed(TimeDelta::new(5, 0).unwrap())
@@ -194,10 +221,7 @@ impl RTCClock {
         );
 
         self.rtc.set_alarm1_hms(future.time()).unwrap();
-        log::info!("interrupts handled {}", INT_COUNT.load(Ordering::Relaxed));
-
         self.rtc.enable_alarm1_interrupts().unwrap();
-        log::info!("interrupts handled {}", INT_COUNT.load(Ordering::Relaxed));
     }
 }
 
