@@ -94,8 +94,10 @@ fn main() {
         .unwrap();
 
     unsafe { int_pin.subscribe(handle_interrupt).unwrap() };
-    int_pin.enable_interrupt().unwrap();
 
+    let mut old_int_cnt = INT_COUNT.load(Ordering::Relaxed);
+
+    int_pin.enable_interrupt().unwrap();
     log::info!("interrupts handled {}", INT_COUNT.load(Ordering::Relaxed));
 
     rtc_clock.test_arming_alarm();
@@ -108,9 +110,19 @@ fn main() {
         sections.grass.toggle().unwrap();
         sections.vegs.toggle().unwrap();
 
-        rtc_clock.get_current_datetime().unwrap();
 
+        if INT_COUNT.load(Ordering::Relaxed) != old_int_cnt {
+            log::info!("reenable interrupt",);
+            int_pin.enable_interrupt().unwrap();
+            old_int_cnt = INT_COUNT.load(Ordering::Relaxed);
+        }
+        log::info!("alarm1 matched {} ", rtc_clock.rtc.has_alarm1_matched().unwrap());
+        log::info!("alarm2 matched {} ", rtc_clock.rtc.has_alarm2_matched().unwrap());
+        rtc_clock.rtc.clear_alarm1_matched_flag().unwrap();
+
+        log::info!("{}", rtc_clock.get_current_datetime().unwrap());
         log::info!("interrupts handled {}", INT_COUNT.load(Ordering::Relaxed));
+        log::info!("int level: {:?}", int_pin.get_level());
     }
 }
 
@@ -137,6 +149,10 @@ impl RTCClock {
 
         rtc.disable_32khz_output()
             .map_err(|e| anyhow!("Cannot disable 32khz output {e:?}"))?;
+
+        rtc.disable_square_wave()
+            .map_err(|e| anyhow!("Cannot disable square wave {e:?}"))?;
+
         rtc.use_int_sqw_output_as_interrupt()
             .map_err(|e| anyhow!("Cannot set sqw as interrupt {e:?}"))?;
 
@@ -176,9 +192,11 @@ impl RTCClock {
             "setting alarm {} -> {future}",
             self.get_current_datetime().unwrap()
         );
-        self.rtc.enable_alarm1_interrupts().unwrap();
-        log::info!("interrupts handled {}", INT_COUNT.load(Ordering::Relaxed));
+
         self.rtc.set_alarm1_hms(future.time()).unwrap();
+        log::info!("interrupts handled {}", INT_COUNT.load(Ordering::Relaxed));
+
+        self.rtc.enable_alarm1_interrupts().unwrap();
         log::info!("interrupts handled {}", INT_COUNT.load(Ordering::Relaxed));
     }
 }
