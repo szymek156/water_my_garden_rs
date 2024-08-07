@@ -1,3 +1,5 @@
+use std::sync::mpsc::{Receiver, Sender};
+
 use anyhow::{anyhow, Result};
 use chrono::{NaiveDateTime, TimeDelta};
 use ds323x::{ic::DS3231, interface::I2cInterface, DateTimeAccess, Ds323x};
@@ -15,6 +17,12 @@ pub struct RTCClock<IntGPIO: IOPin> {
     int_pin: PinDriver<'static, IntGPIO, Input>,
 }
 
+pub enum ClockServiceMessage {
+    InterruptArrived(u32),
+    SubscribeForAlarm1(Sender<()>),
+}
+pub type ClockServiceChannel = Sender<ClockServiceMessage>;
+
 impl<IntGPIO: IOPin> RTCClock<IntGPIO> {
     pub fn new(
         sda_pin: impl Peripheral<P = impl IOPin> + 'static,
@@ -28,15 +36,14 @@ impl<IntGPIO: IOPin> RTCClock<IntGPIO> {
 
         let mut rtc = Ds323x::new_ds3231(i2c_dev);
 
+        // This pin is unused
         rtc.disable_32khz_output()
             .map_err(|e| anyhow!("Cannot disable 32khz output {e:?}"))?;
-
-        rtc.disable_square_wave()
-            .map_err(|e| anyhow!("Cannot disable square wave {e:?}"))?;
 
         rtc.use_int_sqw_output_as_interrupt()
             .map_err(|e| anyhow!("Cannot set sqw as interrupt {e:?}"))?;
 
+        // Cleanup state from previous reboot
         rtc.disable_alarm1_interrupts()
             .map_err(|e| anyhow!("Cannot disable alarm1 INT {e:?}"))?;
         rtc.disable_alarm2_interrupts()
@@ -45,10 +52,6 @@ impl<IntGPIO: IOPin> RTCClock<IntGPIO> {
         // Configure INT GPIO, the SQW output pin of the RTC is connected to it
         let mut int_pin = PinDriver::input(int_pin).unwrap();
 
-        // INT pin on RTC is high by default, listen on falling edge
-        int_pin
-            .set_interrupt_type(esp_idf_svc::hal::gpio::InterruptType::NegEdge)
-            .unwrap();
         int_pin
             .set_pull(esp_idf_svc::hal::gpio::Pull::Down)
             .unwrap();
@@ -56,19 +59,58 @@ impl<IntGPIO: IOPin> RTCClock<IntGPIO> {
         Ok(Self { rtc, int_pin })
     }
 
-    pub fn start(mut self) {
-        // let (tx, rx) = std::sync::mpsc::channel();
+    /// Starts the Clock Service, returns the ClockServiceChannel to communicate with it
+    pub fn start(mut self) -> ClockServiceChannel {
+        // Create channel that is used to communicate with this service
+        let (tx, rx) = std::sync::mpsc::channel();
 
+        self.start_interrupt_service(tx.clone());
+
+        self.test_arming_alarm();
+
+        // Create Clock service
+        std::thread::spawn(move || self.clock_service(rx));
+
+        tx
+    }
+
+    fn clock_service(mut self, rx: Receiver<ClockServiceMessage>) {
+        log::info!("Hello from Clock service!");
+
+        while let Ok(msg) = rx.recv() {
+            match msg {
+                ClockServiceMessage::InterruptArrived(int_count) => {
+                    log::info!("Got interrupt notification in service! #{int_count}");
+
+                    self.test_arming_alarm();
+
+                    self.enable_interrupt();
+                }
+                ClockServiceMessage::SubscribeForAlarm1(tx) => todo!(),
+            }
+        }
+    }
+
+    /// Setup RTC interrupt handling: ISR -> interrupt-handler task -> ClockService task
+    fn start_interrupt_service(&mut self, tx: ClockServiceChannel) {
         // Communicate from ISR with task using FreeRTOS queue.
         // Alternative is to use Notification - this one is however bounded to the task,
         // and cannot be moved across threads.
+
         // ISR part, will use it to push back notifications
-        let queue_isr = Queue::new(100);
+        // TODO: consider embassy async channels, is embassy channel safe to call `send` from ISR?
+        let queue_isr = Queue::new(10);
+
         // Thread part, will pop front notifications
         // SAFETY: Owner of this queue is ISR, captured in a closure. Will never drop.
         let queue_thread = unsafe { Queue::<u32>::new_borrowed(queue_isr.as_raw()) };
 
-        // Start listening on interrupt
+        // INT pin on RTC is high by default, listen on falling edge
+        self.int_pin
+            .set_interrupt_type(esp_idf_svc::hal::gpio::InterruptType::NegEdge)
+            .unwrap();
+        // Start listening on interrupt, set ISR that pushes interrupt notifications to the queue
+        // SAFETY: Using ISR-safe calls here
         unsafe {
             self.int_pin
                 .subscribe(move || {
@@ -85,40 +127,39 @@ impl<IntGPIO: IOPin> RTCClock<IntGPIO> {
                         // interrupt returns directly to the highest priority Ready state task
                         esp_idf_svc::hal::task::do_yield();
                     }
-
-                    // pass interrupt from ISR to thread that handles it
-                    // notifier.notify_and_yield(NonZeroU32::new(INT_COUNT).unwrap());
                 })
                 .unwrap()
         };
 
-        self.int_pin.enable_interrupt().unwrap();
-        self.rtc.clear_alarm1_matched_flag().unwrap();
-        self.rtc.clear_alarm2_matched_flag().unwrap();
+        self.enable_interrupt();
 
-        self.test_arming_alarm();
+        // Create interrupt-handler task, will communicate with the Clock service when interrupt arrive
+        // This is a thin wrapper over the FreeRTOS task
+        std::thread::spawn(move || {
+            log::info!("Hello from RTC interrupt task!");
 
-        {
-            // let tx = tx.clone();
-            // This is a thin wrapper over the FreeRTOS task
-            std::thread::spawn(move || {
-                log::info!("Hello from Clock service!");
-                // Setup INT handler, communicate from ISR to task using Notification
-                // let notification = Notification::new();
-                // let notifier = notification.notifier();
+            // Receive interrupt from ISR
+            while let Some((int_count, _)) = queue_thread.recv_front(delay::BLOCK) {
+                log::debug!("Got interrupt notification! #{int_count}");
+                // Pass it to the service
+                tx.send(ClockServiceMessage::InterruptArrived(int_count))
+                    .expect("Cannot notify Clock service");
+            }
+        });
+    }
 
-                while let Some((msg, _)) = queue_thread.recv_front(delay::BLOCK) {
-                    log::info!("Got interrupt notification! #{msg}");
-                    // Clear the flag on RTC indicating the interrupt got handled, it will enable RTC to trigger again.
-                    if self.rtc.has_alarm1_matched().unwrap() {
-                        self.test_arming_alarm();
-                        self.rtc.clear_alarm1_matched_flag().unwrap();
-                    }
-
-                    self.int_pin.enable_interrupt().unwrap();
-                }
-            });
+    fn enable_interrupt(&mut self) {
+        // Clear the flag on RTC indicating the interrupt got handled, it will enable RTC to trigger again.
+        if self.rtc.has_alarm1_matched().unwrap() {
+            self.rtc.clear_alarm1_matched_flag().unwrap();
         }
+
+        if self.rtc.has_alarm2_matched().unwrap() {
+            self.rtc.clear_alarm2_matched_flag().unwrap();
+        }
+
+        // GPIO interrupt got disabled after fire, re-enable again
+        self.int_pin.enable_interrupt().unwrap();
     }
 
     fn get_current_datetime(&mut self) -> Result<NaiveDateTime> {
