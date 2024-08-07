@@ -1,14 +1,13 @@
-use std::num::NonZeroU32;
-
 use anyhow::{anyhow, Result};
 use chrono::{NaiveDateTime, TimeDelta};
 use ds323x::{ic::DS3231, interface::I2cInterface, DateTimeAccess, Ds323x};
 use esp_idf_svc::hal::{
+    delay,
     gpio::{IOPin, Input, PinDriver},
     i2c::{I2c, I2cConfig, I2cDriver},
     peripheral::Peripheral,
     prelude::*,
-    task::notification::Notification,
+    task::queue::Queue,
 };
 
 pub struct RTCClock<IntGPIO: IOPin> {
@@ -58,43 +57,68 @@ impl<IntGPIO: IOPin> RTCClock<IntGPIO> {
     }
 
     pub fn start(mut self) {
-        // This is a thin wrapper over the FreeRTOS task
-        std::thread::spawn(move || {
-            log::info!("Hello from Clock service!");
-            // Setup INT handler, communicate from ISR to task using Notification
-            let notification = Notification::new();
-            let notifier = notification.notifier();
+        // let (tx, rx) = std::sync::mpsc::channel();
 
-            unsafe {
-                self.int_pin
-                    .subscribe(move || {
-                        static mut INT_COUNT: u32 = 1;
+        // Communicate from ISR with task using FreeRTOS queue.
+        // Alternative is to use Notification - this one is however bounded to the task,
+        // and cannot be moved across threads.
+        // ISR part, will use it to push back notifications
+        let queue_isr = Queue::new(100);
+        // Thread part, will pop front notifications
+        // SAFETY: Owner of this queue is ISR, captured in a closure. Will never drop.
+        let queue_thread = unsafe { Queue::<u32>::new_borrowed(queue_isr.as_raw()) };
 
-                        notifier.notify_and_yield(NonZeroU32::new(INT_COUNT).unwrap());
+        // Start listening on interrupt
+        unsafe {
+            self.int_pin
+                .subscribe(move || {
+                    static mut INT_COUNT: u32 = 1;
 
-                        INT_COUNT += 1;
-                    })
-                    .unwrap()
-            };
+                    let high_prio_task_was_awoken = queue_isr
+                        .send_back(INT_COUNT, delay::NON_BLOCK)
+                        .expect("The interrupt queue is full!");
+                    INT_COUNT += 1;
 
-            self.int_pin.enable_interrupt().unwrap();
-            self.rtc.clear_alarm1_matched_flag().unwrap();
-            self.rtc.clear_alarm2_matched_flag().unwrap();
+                    if high_prio_task_was_awoken {
+                        // This is FreeRTOS detail:
+                        // context switch should be performed before the interrupt is exited. This will ensure that the
+                        // interrupt returns directly to the highest priority Ready state task
+                        esp_idf_svc::hal::task::do_yield();
+                    }
 
-            self.test_arming_alarm();
+                    // pass interrupt from ISR to thread that handles it
+                    // notifier.notify_and_yield(NonZeroU32::new(INT_COUNT).unwrap());
+                })
+                .unwrap()
+        };
 
-            while let Some(msg) = notification.wait(esp_idf_svc::hal::delay::BLOCK) {
-                log::info!("Got interrupt notification! #{msg}");
+        self.int_pin.enable_interrupt().unwrap();
+        self.rtc.clear_alarm1_matched_flag().unwrap();
+        self.rtc.clear_alarm2_matched_flag().unwrap();
 
-                // Clear the flag on RTC indicating the interrupt got handled, it will enable RTC to trigger again.
-                if self.rtc.has_alarm1_matched().unwrap() {
-                    self.test_arming_alarm();
-                    self.rtc.clear_alarm1_matched_flag().unwrap();
+        self.test_arming_alarm();
+
+        {
+            // let tx = tx.clone();
+            // This is a thin wrapper over the FreeRTOS task
+            std::thread::spawn(move || {
+                log::info!("Hello from Clock service!");
+                // Setup INT handler, communicate from ISR to task using Notification
+                // let notification = Notification::new();
+                // let notifier = notification.notifier();
+
+                while let Some((msg, _)) = queue_thread.recv_front(delay::BLOCK) {
+                    log::info!("Got interrupt notification! #{msg}");
+                    // Clear the flag on RTC indicating the interrupt got handled, it will enable RTC to trigger again.
+                    if self.rtc.has_alarm1_matched().unwrap() {
+                        self.test_arming_alarm();
+                        self.rtc.clear_alarm1_matched_flag().unwrap();
+                    }
+
+                    self.int_pin.enable_interrupt().unwrap();
                 }
-
-                self.int_pin.enable_interrupt().unwrap();
-            }
-        });
+            });
+        }
     }
 
     fn get_current_datetime(&mut self) -> Result<NaiveDateTime> {
