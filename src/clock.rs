@@ -98,7 +98,6 @@ impl<IntGPIO: IOPin> RTCClock<IntGPIO> {
         // and cannot be moved across threads.
 
         // ISR part, will use it to push back notifications
-        // TODO: consider embassy async channels, is embassy channel safe to call `send` from ISR?
         let queue_isr = Queue::new(10);
 
         // Thread part, will pop front notifications
@@ -109,6 +108,7 @@ impl<IntGPIO: IOPin> RTCClock<IntGPIO> {
         self.int_pin
             .set_interrupt_type(esp_idf_svc::hal::gpio::InterruptType::NegEdge)
             .unwrap();
+
         // Start listening on interrupt, set ISR that pushes interrupt notifications to the queue
         // SAFETY: Using ISR-safe calls here
         unsafe {
@@ -123,7 +123,7 @@ impl<IntGPIO: IOPin> RTCClock<IntGPIO> {
 
                     if high_prio_task_was_awoken {
                         // This is FreeRTOS detail:
-                        // context switch should be performed before the interrupt is exited. This will ensure that the
+                        // Context switch should be performed before the interrupt is exited. This will ensure that the
                         // interrupt returns directly to the highest priority Ready state task
                         esp_idf_svc::hal::task::do_yield();
                     }
@@ -135,6 +135,9 @@ impl<IntGPIO: IOPin> RTCClock<IntGPIO> {
 
         // Create interrupt-handler task, will communicate with the Clock service when interrupt arrive
         // This is a thin wrapper over the FreeRTOS task
+        // TODO: that thread might be redundant if embassy channels are safe to call from ISR.
+        // The std::sync::mpsc channels are not. Therefore current solution uses ISR-safe primitive (FreeRTOS queue)
+        // to communicate with following thread, and this thread finally communicates with the Clock service using mpsc channel.
         std::thread::spawn(move || {
             log::info!("Hello from RTC interrupt task!");
 
