@@ -21,6 +21,8 @@ pub fn connect_to_wifi(
         info!("Wifi password is empty");
     }
 
+    info!("Connecting to WiFi: {}", ssid);
+
     let mut esp_wifi = EspWifi::new(modem, sysloop.clone(), None)?;
 
     let mut wifi = BlockingWifi::wrap(&mut esp_wifi, sysloop)?;

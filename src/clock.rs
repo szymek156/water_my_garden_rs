@@ -12,7 +12,7 @@ use esp_idf_svc::hal::{
     task::queue::Queue,
 };
 
-pub struct RTCClock<IntGPIO: IOPin> {
+pub struct ClockService<IntGPIO: IOPin> {
     rtc: Ds323x<I2cInterface<I2cDriver<'static>>, DS3231>,
     int_pin: PinDriver<'static, IntGPIO, Input>,
 }
@@ -23,7 +23,7 @@ pub enum ClockServiceMessage {
 }
 pub type ClockServiceChannel = Sender<ClockServiceMessage>;
 
-impl<IntGPIO: IOPin> RTCClock<IntGPIO> {
+impl<IntGPIO: IOPin> ClockService<IntGPIO> {
     pub fn new(
         sda_pin: impl Peripheral<P = impl IOPin> + 'static,
         scl_pin: impl Peripheral<P = impl IOPin> + 'static,
@@ -86,7 +86,7 @@ impl<IntGPIO: IOPin> RTCClock<IntGPIO> {
 
                     self.enable_interrupt();
                 }
-                ClockServiceMessage::SubscribeForAlarm1(tx) => todo!(),
+                ClockServiceMessage::SubscribeForAlarm1(_tx) => todo!(),
             }
         }
     }

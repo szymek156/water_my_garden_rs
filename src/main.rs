@@ -3,7 +3,7 @@ mod wifi;
 
 use anyhow::Result;
 
-use clock::RTCClock;
+use clock::ClockService;
 
 use enum_iterator::Sequence;
 use esp_idf_svc::hal::gpio::{Output, OutputPin};
@@ -39,9 +39,7 @@ fn main() {
     esp_idf_svc::log::EspLogger::initialize_default();
     say_hello();
 
-    let app_config = CONFIG;
-
-    log::info!("WiFi creds: {}", app_config.wifi_ssid);
+    let _app_config = CONFIG;
 
     let _sysloop = EspSystemEventLoop::take().expect("Cannot take SystemEventLoop");
     let peripherals = Peripherals::take().expect("Cannot take peripherals");
@@ -66,7 +64,7 @@ fn main() {
     )
     .expect("Failed to setup GPIO");
 
-    let rtc_clock = RTCClock::new(
+    let clock_service = ClockService::new(
         peripherals.pins.gpio21,
         peripherals.pins.gpio22,
         peripherals.pins.gpio23,
@@ -74,7 +72,7 @@ fn main() {
     )
     .expect("Unable to create RTC clock");
 
-    rtc_clock.start();
+    let _clock_service_channel = clock_service.start();
 
     loop {
         sleep(Duration::from_millis(1000));
