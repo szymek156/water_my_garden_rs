@@ -41,6 +41,28 @@ fn main() {
 
     // Bind the log crate to the ESP Logging facilities
     esp_idf_svc::log::EspLogger::initialize_default();
+    esp_idf_svc::log::set_target_level("water_my_garden_rs", log::LevelFilter::Debug).unwrap();
+
+    // TODO: for now quick and dirty, figure something clever
+    #[cfg(test)]
+    execute_tests();
+    #[cfg(not(test))]
+    run();
+
+    loop {
+        sleep(Duration::from_millis(1000));
+    }
+}
+
+
+#[cfg(test)]
+fn execute_tests() {
+    log::info!("Executing tests");
+    watering::tests::example_valid_configuration_works();
+    log::info!("All tests passed!");
+}
+
+fn run() {
     say_hello();
 
     let _app_config = CONFIG;
@@ -81,10 +103,6 @@ fn main() {
 
     let watering_service = WateringService::new(clock_service_channel, sections_service_channel);
     let watering_service_channel = watering_service.start();
-
-    loop {
-        sleep(Duration::from_millis(1000));
-    }
 }
 
 fn setup_http_server() -> EspHttpServer<'static> {
