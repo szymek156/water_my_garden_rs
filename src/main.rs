@@ -1,4 +1,6 @@
 mod clock;
+mod sections;
+mod watering;
 mod wifi;
 
 use anyhow::Result;
@@ -18,6 +20,8 @@ use esp_idf_svc::{
     },
     io::Write as _,
 };
+use sections::Sections;
+use watering::WateringService;
 
 use std::{thread::sleep, time::Duration};
 
@@ -56,13 +60,13 @@ fn main() {
     // // Set the HTTP server
     // let _http_server = setup_http_server();
 
-    let mut sections = Sections::new(
+    let sections_service = Sections::new(
         peripherals.pins.gpio14,
         peripherals.pins.gpio26,
         peripherals.pins.gpio27,
         peripherals.pins.gpio33,
     )
-    .expect("Failed to setup GPIO");
+    .expect("Failed to setup Sections");
 
     let clock_service = ClockService::new(
         peripherals.pins.gpio21,
@@ -70,66 +74,16 @@ fn main() {
         peripherals.pins.gpio23,
         peripherals.i2c0,
     )
-    .expect("Unable to create RTC clock");
+    .expect("Failed to setup Clock");
 
-    let _clock_service_channel = clock_service.start();
+    let clock_service_channel = clock_service.start();
+    let sections_service_channel = sections_service.start();
+
+    let watering_service = WateringService::new(clock_service_channel, sections_service_channel);
+    let watering_service_channel = watering_service.start();
 
     loop {
         sleep(Duration::from_millis(1000));
-        log::info!("Toggle pins");
-        sections.flowers.toggle().unwrap();
-        sections.terrace.toggle().unwrap();
-        sections.grass.toggle().unwrap();
-        sections.vegs.toggle().unwrap();
-    }
-}
-
-#[derive(Debug, PartialEq, Sequence)]
-enum CurrentSection {
-    Vegs,
-    Flowers,
-    Grass,
-    Terrace,
-    None,
-}
-
-struct Sections<
-    VegsGPIO: OutputPin,
-    TerraceGPIO: OutputPin,
-    FlowersGPIO: OutputPin,
-    GrassGPIO: OutputPin,
-> {
-    vegs: PinDriver<'static, VegsGPIO, Output>,
-    terrace: PinDriver<'static, TerraceGPIO, Output>,
-    flowers: PinDriver<'static, FlowersGPIO, Output>,
-    grass: PinDriver<'static, GrassGPIO, Output>,
-
-    current_section: CurrentSection,
-}
-
-impl<VegsGPIO: OutputPin, TerraceGPIO: OutputPin, FlowersGPIO: OutputPin, GrassGPIO: OutputPin>
-    Sections<VegsGPIO, TerraceGPIO, FlowersGPIO, GrassGPIO>
-{
-    fn new(
-        vegs_pin: impl Peripheral<P = VegsGPIO> + 'static,
-        terrace_pin: impl Peripheral<P = TerraceGPIO> + 'static,
-        flowers_pin: impl Peripheral<P = FlowersGPIO> + 'static,
-        grass_pin: impl Peripheral<P = GrassGPIO> + 'static,
-    ) -> Result<Self> {
-        let mut sections = Self {
-            vegs: PinDriver::output(vegs_pin)?,
-            terrace: PinDriver::output(terrace_pin)?,
-            flowers: PinDriver::output(flowers_pin)?,
-            grass: PinDriver::output(grass_pin)?,
-            current_section: CurrentSection::None,
-        };
-
-        sections.vegs.set_low()?;
-        sections.flowers.set_low()?;
-        sections.terrace.set_low()?;
-        sections.grass.set_low()?;
-
-        Ok(sections)
     }
 }
 

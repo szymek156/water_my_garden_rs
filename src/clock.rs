@@ -1,7 +1,7 @@
-use std::sync::mpsc::{Receiver, Sender};
+//! Abstraction over timekeeping hardware
 
 use anyhow::{anyhow, Result};
-use chrono::{NaiveDateTime, TimeDelta};
+use chrono::{NaiveDateTime, NaiveTime, TimeDelta};
 use ds323x::{ic::DS3231, interface::I2cInterface, DateTimeAccess, Ds323x};
 use esp_idf_svc::hal::{
     delay,
@@ -11,16 +11,40 @@ use esp_idf_svc::hal::{
     prelude::*,
     task::queue::Queue,
 };
+use log::{error, info};
+use std::sync::mpsc::{Receiver, Sender};
+
+use crate::watering::WateringServiceMessage;
 
 pub struct ClockService<IntGPIO: IOPin> {
     rtc: Ds323x<I2cInterface<I2cDriver<'static>>, DS3231>,
     int_pin: PinDriver<'static, IntGPIO, Input>,
+    alarm1_subscribers: Vec<Sender<WateringServiceMessage>>,
+    alarm2_subscribers: Vec<Sender<WateringServiceMessage>>,
+}
+
+#[derive(Debug)]
+pub struct ClockStatus {
+    // alarm1 when
+    // alarm2 when
+    // status reg
+    // other regs
+    temp: f32,
+    now: NaiveDateTime,
 }
 
 pub enum ClockServiceMessage {
     InterruptArrived(u32),
-    SubscribeForAlarm1(Sender<()>),
+    SubscribeForAlarm1(Sender<WateringServiceMessage>),
+    SubscribeForAlarm2(Sender<WateringServiceMessage>),
+    SetAlarm1(NaiveTime),
+    SetAlarm2(NaiveTime),
+    DisableAlarm1,
+    DisableAlarm2,
+    GetStatus(Sender<ClockStatus>),
+    GetDateTime(Sender<NaiveDateTime>)
 }
+
 pub type ClockServiceChannel = Sender<ClockServiceMessage>;
 
 impl<IntGPIO: IOPin> ClockService<IntGPIO> {
@@ -56,7 +80,12 @@ impl<IntGPIO: IOPin> ClockService<IntGPIO> {
             .set_pull(esp_idf_svc::hal::gpio::Pull::Down)
             .unwrap();
 
-        Ok(Self { rtc, int_pin })
+        Ok(Self {
+            rtc,
+            int_pin,
+            alarm1_subscribers: vec![],
+            alarm2_subscribers: vec![],
+        })
     }
 
     /// Starts the Clock Service, returns the ClockServiceChannel to communicate with it
@@ -65,8 +94,6 @@ impl<IntGPIO: IOPin> ClockService<IntGPIO> {
         let (tx, rx) = std::sync::mpsc::channel();
 
         self.start_interrupt_service(tx.clone());
-
-        self.test_arming_alarm();
 
         // Create Clock service
         std::thread::spawn(move || self.clock_service(rx));
@@ -82,11 +109,66 @@ impl<IntGPIO: IOPin> ClockService<IntGPIO> {
                 ClockServiceMessage::InterruptArrived(int_count) => {
                     log::info!("Got interrupt notification in service! #{int_count}");
 
-                    self.test_arming_alarm();
+                    // Try to send to the subscribers, if fails, it means rx "unsubscribed", filter such entries
+                    if self.rtc.has_alarm1_matched().unwrap() {
+                        let subscribers = self
+                            .alarm1_subscribers
+                            .into_iter()
+                            .filter(|tx| tx.send(WateringServiceMessage::Alarm1Fired).is_ok())
+                            .collect();
+                        self.alarm1_subscribers = subscribers;
+                    }
+
+                    if self.rtc.has_alarm2_matched().unwrap() {
+                        let subscribers = self
+                            .alarm2_subscribers
+                            .into_iter()
+                            .filter(|tx| tx.send(WateringServiceMessage::Alarm2Fired).is_ok())
+                            .collect();
+                        self.alarm2_subscribers = subscribers;
+                    }
 
                     self.enable_interrupt();
                 }
-                ClockServiceMessage::SubscribeForAlarm1(_tx) => todo!(),
+                ClockServiceMessage::SubscribeForAlarm1(tx) => self.alarm1_subscribers.push(tx),
+                ClockServiceMessage::SubscribeForAlarm2(tx) => self.alarm2_subscribers.push(tx),
+                ClockServiceMessage::SetAlarm1(when) => {
+                    info!("Setting Alarm1 to {when}");
+                    self.rtc.set_alarm1_hms(when).unwrap();
+                    self.rtc.enable_alarm1_interrupts().unwrap();
+                }
+                ClockServiceMessage::SetAlarm2(when) => {
+                    info!("Setting Alarm2 to {when}");
+                    self.rtc.set_alarm2_hm(when).unwrap();
+                    self.rtc.enable_alarm2_interrupts().unwrap();
+                }
+                ClockServiceMessage::DisableAlarm1 => {
+                    info!("Disabling Alarm1");
+                    self.rtc.disable_alarm1_interrupts().unwrap();
+                }
+                ClockServiceMessage::DisableAlarm2 => {
+                    info!("Disabling Alarm2");
+                    self.rtc.disable_alarm2_interrupts().unwrap();
+                }
+                ClockServiceMessage::GetStatus(tx) => {
+                    let temp = self.get_temperature().unwrap();
+                    let now = self.get_current_datetime().unwrap();
+
+                    let status = ClockStatus { temp, now };
+
+                    info!("Reporting Clock status {status:#?}");
+                    if let Err(e) = tx.send(status) {
+                        error!("Failed to send Clock status as a response {e}");
+                    }
+                }
+                ClockServiceMessage::GetDateTime(tx) => {
+                    let now = self.get_current_datetime().unwrap();
+
+                    info!("Reporting time {now}");
+                    if let Err(e) = tx.send(now) {
+                        error!("Failed to send time status as a response {e}");
+                    }
+                },
             }
         }
     }
@@ -183,18 +265,18 @@ impl<IntGPIO: IOPin> ClockService<IntGPIO> {
         Ok(temp)
     }
 
-    fn test_arming_alarm(&mut self) {
-        let now = self.get_current_datetime().unwrap();
-        let future = now
-            .checked_add_signed(TimeDelta::new(5, 0).unwrap())
-            .unwrap();
+    // fn test_arming_alarm(&mut self) {
+    //     let now = self.get_current_datetime().unwrap();
+    //     let future = now
+    //         .checked_add_signed(TimeDelta::new(5, 0).unwrap())
+    //         .unwrap();
 
-        log::info!(
-            "setting alarm {} -> {future}",
-            self.get_current_datetime().unwrap()
-        );
+    //     log::info!(
+    //         "setting alarm {} -> {future}",
+    //         self.get_current_datetime().unwrap()
+    //     );
 
-        self.rtc.set_alarm1_hms(future.time()).unwrap();
-        self.rtc.enable_alarm1_interrupts().unwrap();
-    }
+    //     self.rtc.set_alarm1_hms(future.time()).unwrap();
+    //     self.rtc.enable_alarm1_interrupts().unwrap();
+    // }
 }
