@@ -1,7 +1,7 @@
 //! Abstraction over timekeeping hardware
 
 use anyhow::{anyhow, Result};
-use chrono::{NaiveDateTime, NaiveTime, TimeDelta};
+use chrono::{NaiveDateTime, NaiveTime};
 use ds323x::{ic::DS3231, interface::I2cInterface, DateTimeAccess, Ds323x};
 use esp_idf_svc::hal::{
     delay,
@@ -14,7 +14,7 @@ use esp_idf_svc::hal::{
 use log::{error, info};
 use std::sync::mpsc::{Receiver, Sender};
 
-use crate::watering::WateringServiceMessage;
+use crate::{sections::SectionDuration, watering::WateringServiceMessage};
 
 pub struct ClockService<IntGPIO: IOPin> {
     rtc: Ds323x<I2cInterface<I2cDriver<'static>>, DS3231>,
@@ -33,16 +33,19 @@ pub struct ClockStatus {
     now: NaiveDateTime,
 }
 
+#[derive(Debug, Clone)]
 pub enum ClockServiceMessage {
     InterruptArrived(u32),
     SubscribeForAlarm1(Sender<WateringServiceMessage>),
     SubscribeForAlarm2(Sender<WateringServiceMessage>),
+    /// Set exact time HH:MM::SS
     SetAlarm1(NaiveTime),
-    SetAlarm2(NaiveTime),
+    /// Set alarm in some time in the future referring from current time. E.g. in 15 minutes
+    SetAlarm2After(SectionDuration),
     DisableAlarm1,
     DisableAlarm2,
     GetStatus(Sender<ClockStatus>),
-    GetDateTime(Sender<NaiveDateTime>)
+    GetDateTime(Sender<NaiveDateTime>),
 }
 
 pub type ClockServiceChannel = Sender<ClockServiceMessage>;
@@ -137,9 +140,12 @@ impl<IntGPIO: IOPin> ClockService<IntGPIO> {
                     self.rtc.set_alarm1_hms(when).unwrap();
                     self.rtc.enable_alarm1_interrupts().unwrap();
                 }
-                ClockServiceMessage::SetAlarm2(when) => {
-                    info!("Setting Alarm2 to {when}");
-                    self.rtc.set_alarm2_hm(when).unwrap();
+                ClockServiceMessage::SetAlarm2After(offset) => {
+                    info!("Handling Alarm2 with offset {offset}");
+                    let now = self.get_current_datetime().unwrap();
+                    let future = now.checked_add_signed(offset.into_inner()).unwrap();
+                    info!("Setting Alarm2 to {future}");
+                    self.rtc.set_alarm2_hm(future.time()).unwrap();
                     self.rtc.enable_alarm2_interrupts().unwrap();
                 }
                 ClockServiceMessage::DisableAlarm1 => {
@@ -168,7 +174,7 @@ impl<IntGPIO: IOPin> ClockService<IntGPIO> {
                     if let Err(e) = tx.send(now) {
                         error!("Failed to send time status as a response {e}");
                     }
-                },
+                }
             }
         }
     }
@@ -254,6 +260,7 @@ impl<IntGPIO: IOPin> ClockService<IntGPIO> {
             .datetime()
             .map_err(|e| anyhow!("Failed to read current datetime {e:?}"))?;
 
+        info!("RTC: {datetime}");
         Ok(datetime)
     }
 
@@ -264,19 +271,4 @@ impl<IntGPIO: IOPin> ClockService<IntGPIO> {
             .map_err(|e| anyhow!("Failed to read temperature {e:?}"))?;
         Ok(temp)
     }
-
-    // fn test_arming_alarm(&mut self) {
-    //     let now = self.get_current_datetime().unwrap();
-    //     let future = now
-    //         .checked_add_signed(TimeDelta::new(5, 0).unwrap())
-    //         .unwrap();
-
-    //     log::info!(
-    //         "setting alarm {} -> {future}",
-    //         self.get_current_datetime().unwrap()
-    //     );
-
-    //     self.rtc.set_alarm1_hms(future.time()).unwrap();
-    //     self.rtc.enable_alarm1_interrupts().unwrap();
-    // }
 }

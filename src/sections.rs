@@ -1,8 +1,12 @@
 //! Abstraction over hardware for enabling/disabling sections
 
-use std::sync::mpsc::{Receiver, Sender};
+use std::{
+    fmt::Display,
+    sync::mpsc::{Receiver, Sender},
+};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
+use chrono::TimeDelta;
 use enum_iterator::Sequence;
 use esp_idf_svc::hal::{
     gpio::{Output, OutputPin, PinDriver},
@@ -16,6 +20,53 @@ pub enum Section {
     Grass,
     Terrace,
     None,
+}
+
+// TODO: tests
+/// Newtype that gets reasonable values for section watering duration - non negative and less than 2 hours
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SectionDuration(TimeDelta);
+
+impl SectionDuration {
+    pub fn new(td: TimeDelta) -> Result<Self> {
+        if td.num_seconds() < 0 {
+            bail!("delta is negative");
+        }
+
+        if td.num_hours() > 1 {
+            bail!("cannot water section for more than 2 hours");
+        }
+
+        Ok(Self(td))
+    }
+
+    pub fn into_inner(self) -> TimeDelta {
+        self.0
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.0.is_zero()
+    }
+}
+
+impl TryInto<SectionDuration> for TimeDelta {
+    type Error = anyhow::Error;
+
+    fn try_into(self) -> std::result::Result<SectionDuration, Self::Error> {
+        SectionDuration::new(self)
+    }
+}
+
+impl Display for SectionDuration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:02}h {:02}m {:02}s",
+            self.0.num_hours(),
+            self.0.num_minutes() % 60,
+            self.0.num_seconds() % 60
+        )
+    }
 }
 
 pub enum SectionsServiceMessage {
@@ -61,7 +112,7 @@ impl<VegsGPIO: OutputPin, TerraceGPIO: OutputPin, FlowersGPIO: OutputPin, GrassG
     }
 
     /// Starts the Sections Service, returns the SectionsServiceChannel to communicate with it
-    pub fn start(mut self) -> SectionsServiceChannel {
+    pub fn start(self) -> SectionsServiceChannel {
         // Create channel that is used to communicate with this service
         let (tx, rx) = std::sync::mpsc::channel();
 

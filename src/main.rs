@@ -3,17 +3,11 @@ mod sections;
 mod watering;
 mod wifi;
 
-use anyhow::Result;
-
 use clock::ClockService;
 
-use enum_iterator::Sequence;
-use esp_idf_svc::hal::gpio::{Output, OutputPin};
-
-use esp_idf_svc::hal::peripheral::Peripheral;
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
-    hal::{gpio::PinDriver, prelude::*},
+    hal::prelude::*,
     http::{
         server::{Configuration, EspHttpServer},
         Method,
@@ -54,11 +48,12 @@ fn main() {
     }
 }
 
-
 #[cfg(test)]
 fn execute_tests() {
     log::info!("Executing tests");
     watering::tests::example_valid_configuration_works();
+    watering::tests::can_skip_a_section();
+    watering::tests::can_skip_all_sections();
     log::info!("All tests passed!");
 }
 
@@ -102,7 +97,7 @@ fn run() {
     let sections_service_channel = sections_service.start();
 
     let watering_service = WateringService::new(clock_service_channel, sections_service_channel);
-    let watering_service_channel = watering_service.start();
+    let _watering_service_channel = watering_service.start();
 }
 
 fn setup_http_server() -> EspHttpServer<'static> {
