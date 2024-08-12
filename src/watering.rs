@@ -20,6 +20,10 @@ pub enum WateringServiceMessage {
     Alarm2Fired,
     StartWateringAt(NaiveTime),
     SetSectionDuration(Section, SectionDuration),
+    /// Enable section right now, for given duration
+    EnableSectionFor(Section, SectionDuration),
+    /// Close valves for all sections
+    CloseAllValves,
 }
 pub type WateringServiceChannel = Sender<WateringServiceMessage>;
 
@@ -29,6 +33,9 @@ pub struct WateringService {
     // TODO: watchdog for section opening
     current_section: Section,
     section_durations: HashMap<Section, SectionDuration>,
+    /// Indicates whether section is watered out of schedule
+    // TODO: sounds like a typestate pattern
+    out_of_schedule_watering: Section,
 }
 
 impl WateringService {
@@ -37,6 +44,7 @@ impl WateringService {
             clock_tx,
             sections_tx,
             current_section: Section::None,
+            out_of_schedule_watering: Section::None,
             section_durations: enum_iterator::all::<Section>()
                 .map(|section| (section, SectionDuration::default()))
                 .collect::<HashMap<_, _>>(),
@@ -70,7 +78,10 @@ impl WateringService {
         match msg {
             WateringServiceMessage::Alarm1Fired => {
                 info!("Got notification about alarm1");
+                // TODO: Sanity call
+                // self.close_all_valves();
 
+                // TODO: out of schedule watering
                 // start watchdog
 
                 // There should be no watering in progress
@@ -79,10 +90,17 @@ impl WateringService {
                 self.water_next_section()
             }
             WateringServiceMessage::Alarm2Fired => {
+                info!("Got notification about alarm2");
+
+                if self.out_of_schedule_watering != Section::None {
+                    self.close_all_valves();
+                    self.disable_section_timer();
+                    self.out_of_schedule_watering = Section::None;
+                    return;
+                }
+
                 // This alarm should be assigned to some section
                 assert_ne!(self.current_section, Section::None);
-
-                info!("Got notification about alarm2");
                 self.water_next_section()
             }
             WateringServiceMessage::StartWateringAt(when) => {
@@ -95,6 +113,34 @@ impl WateringService {
                 info!("Setting up section {section:?} for {duration}");
                 let _ = self.section_durations.insert(section, duration);
             }
+            WateringServiceMessage::EnableSectionFor(section, duration) => {
+                info!("Ad-hoc watering of {section:?}");
+
+                if self.out_of_schedule_watering != Section::None {
+                    self.close_all_valves();
+                }
+
+                if duration.is_zero() {
+                    self.close_all_valves();
+                    self.disable_section_timer();
+                }
+
+                self.set_section_timer(&duration);
+                self.out_of_schedule_watering = section;
+            }
+            WateringServiceMessage::CloseAllValves => {
+                self.close_all_valves();
+            }
+        }
+    }
+
+    fn close_all_valves(&mut self) {
+        info!("Closing all valves...");
+        for section in enum_iterator::all::<Section>() {
+            info!("     {section:?}...");
+            self.sections_tx
+                .send(crate::sections::SectionsServiceMessage::Disable(section))
+                .unwrap();
         }
     }
 
@@ -164,6 +210,10 @@ impl WateringService {
 
 #[cfg(test)]
 pub mod tests {
+    use std::{sync::mpsc::Receiver, time::Duration};
+
+    use chrono::{NaiveDateTime, TimeDelta};
+
     use crate::sections::SectionsServiceMessage;
 
     use super::*;
@@ -444,7 +494,7 @@ pub mod tests {
     }
 
     fn verify_moved_to_next_section(
-        _current_section: Section,
+        current_section: Section,
         next_section: Section,
         expected_next_section: Section,
         expected_duration: SectionDuration,
@@ -457,13 +507,13 @@ pub mod tests {
         // Expect current section got disabled
         assert!(matches!(
             sections_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            SectionsServiceMessage::Disable(_current_section)
+            SectionsServiceMessage::Disable(current_section)
         ));
 
         // Expect next section got enabled
         assert!(matches!(
             sections_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            SectionsServiceMessage::Enable(_expected_next_section)
+            SectionsServiceMessage::Enable(expected_next_section)
         ));
 
         // Expect alarm2 is set
