@@ -2,6 +2,7 @@
 
 use std::{
     fmt::Display,
+    str::FromStr,
     sync::mpsc::{Receiver, Sender},
 };
 
@@ -12,8 +13,9 @@ use esp_idf_svc::hal::{
     gpio::{Output, OutputPin, PinDriver},
     peripheral::Peripheral,
 };
+use serde::{Deserialize, Deserializer};
 
-#[derive(Debug, PartialEq, Sequence, Hash, Eq, Copy, Clone)]
+#[derive(Deserialize, Debug, PartialEq, Sequence, Hash, Eq, Copy, Clone)]
 pub enum Section {
     Vegs,
     Flowers,
@@ -26,6 +28,20 @@ pub enum Section {
 /// Newtype that gets reasonable values for section watering duration - non negative and less than 2 hours
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SectionDuration(TimeDelta);
+
+/// Lets assume valid format is minutes, like "90" is 1 hour 30 mins
+impl<'de> Deserialize<'de> for SectionDuration {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let minutes = i64::deserialize(deserializer)?;
+        let duration =
+            SectionDuration::new(TimeDelta::minutes(minutes)).map_err(serde::de::Error::custom)?;
+
+        Ok(duration)
+    }
+}
 
 impl SectionDuration {
     pub fn new(td: TimeDelta) -> Result<Self> {

@@ -2,6 +2,7 @@ mod clock;
 mod sections;
 mod watering;
 mod wifi;
+mod http_server;
 
 use clock::ClockService;
 
@@ -14,8 +15,10 @@ use esp_idf_svc::{
     },
     io::Write as _,
 };
+use http_server::setup_http_server;
 use sections::Sections;
 use watering::WateringService;
+use wifi::connect_to_wifi;
 
 use std::{thread::sleep, time::Duration};
 
@@ -60,22 +63,22 @@ fn execute_tests() {
 fn run() {
     say_hello();
 
-    let _app_config = CONFIG;
+    let app_config = CONFIG;
 
-    let _sysloop = EspSystemEventLoop::take().expect("Cannot take SystemEventLoop");
+    let sysloop = EspSystemEventLoop::take().expect("Cannot take SystemEventLoop");
     let peripherals = Peripherals::take().expect("Cannot take peripherals");
 
     // Connect to the Wi-Fi network
-    // let _wifi = connect_to_wifi(
-    //     app_config.wifi_ssid,
-    //     app_config.wifi_psk,
-    //     peripherals.modem,
-    //     sysloop,
-    // )
-    // .expect("cannot connect to wifi");
+    let wifi = connect_to_wifi(
+        app_config.wifi_ssid,
+        app_config.wifi_psk,
+        peripherals.modem,
+        sysloop,
+    )
+    .expect("cannot connect to wifi");
 
-    // // Set the HTTP server
-    // let _http_server = setup_http_server();
+    // Don't call dtor over lifespan of the board
+    core::mem::forget(wifi);
 
     let sections_service = Sections::new(
         peripherals.pins.gpio14,
@@ -96,25 +99,15 @@ fn run() {
     let clock_service_channel = clock_service.start();
     let sections_service_channel = sections_service.start();
 
-    let watering_service = WateringService::new(clock_service_channel, sections_service_channel);
-    let _watering_service_channel = watering_service.start();
+    let watering_service = WateringService::new(clock_service_channel.clone(), sections_service_channel);
+    let watering_service_channel = watering_service.start();
+
+    // Set the HTTP server
+    let http_server = setup_http_server(clock_service_channel, watering_service_channel);
+    // Never call dtor of the server
+    core::mem::forget(http_server);
 }
 
-fn setup_http_server() -> EspHttpServer<'static> {
-    let mut server =
-        EspHttpServer::new(&Configuration::default()).expect("Cannot create the http server");
-    // http://<sta ip>/ handler
-    server
-        .fn_handler("/", Method::Get, |request| -> anyhow::Result<()> {
-            let html = "It works!";
-            let mut response = request.into_ok_response()?;
-            response.write_all(html.as_bytes())?;
-            Ok(())
-        })
-        .expect("Cannot add the handler");
-
-    server
-}
 
 fn say_hello() {
     log::info!(
