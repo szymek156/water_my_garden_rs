@@ -2,7 +2,6 @@
 
 use std::{
     fmt::{Debug, Display},
-    str::FromStr,
     sync::mpsc::{Receiver, Sender},
 };
 
@@ -15,7 +14,7 @@ use esp_idf_svc::hal::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
-#[derive(Serialize,Deserialize, Debug, PartialEq, Sequence, Hash, Eq, Copy, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Sequence, Hash, Eq, Copy, Clone)]
 pub enum Section {
     Vegs,
     Flowers,
@@ -46,7 +45,8 @@ impl<'de> Deserialize<'de> for SectionDuration {
 impl Serialize for SectionDuration {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
-        S: serde::Serializer {
+        S: serde::Serializer,
+    {
         serializer.serialize_i64(self.0.num_minutes())
     }
 }
@@ -83,7 +83,7 @@ impl TryInto<SectionDuration> for TimeDelta {
 
 impl Debug for SectionDuration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        <SectionDuration as Display>::fmt(&self, f)
+        <SectionDuration as Display>::fmt(self, f)
     }
 }
 

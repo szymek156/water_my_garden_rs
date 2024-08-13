@@ -8,8 +8,6 @@ use embedded_svc::{
 use esp_idf_svc::http::server::EspHttpConnection;
 use esp_idf_svc::http::server::Request;
 use esp_idf_svc::{
-    eventloop::EspSystemEventLoop,
-    hal::prelude::*,
     http::server::{Configuration, EspHttpServer},
     io::Write as _,
 };
@@ -45,7 +43,9 @@ pub fn setup_http_server(
         let watering_tx = watering_service_channel.clone();
         let clock_tx = clock_service_channel.clone();
         server
-            .fn_handler("/status", Method::Get, move |req| status(req, &watering_tx, &clock_tx))
+            .fn_handler("/status", Method::Get, move |req| {
+                status(req, &watering_tx, &clock_tx)
+            })
             .context("handler /status")?;
     }
 
@@ -103,7 +103,7 @@ const MAX_LEN: usize = 128;
 fn status(
     req: Request<&mut EspHttpConnection<'_>>,
     watering_tx: &WateringServiceChannel,
-    clock_tx: &ClockServiceChannel
+    clock_tx: &ClockServiceChannel,
 ) -> anyhow::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel();
 
@@ -117,7 +117,6 @@ fn status(
 
     let (tx, rx) = std::sync::mpsc::channel();
     clock_tx.send(crate::clock::ClockServiceMessage::GetStatus(tx))?;
-
 
     let Ok(clock_status) = rx.recv_timeout(Duration::from_secs(10)) else {
         req.into_status_response(500)?
@@ -232,7 +231,6 @@ fn enable_section_for(
 
     Ok(())
 }
-
 
 fn get_body<T: DeserializeOwned>(
     req: &mut Request<&mut EspHttpConnection>,

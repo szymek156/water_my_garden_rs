@@ -526,7 +526,7 @@ pub mod tests {
     }
 
     fn verify_moved_to_next_section(
-        current_section: Section,
+        expected_current_section: Section,
         next_section: Section,
         expected_next_section: Section,
         expected_duration: SectionDuration,
@@ -539,13 +539,13 @@ pub mod tests {
         // Expect current section got disabled
         assert!(matches!(
             sections_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            SectionsServiceMessage::Disable(current_section)
+            SectionsServiceMessage::Disable(current_section) if current_section == expected_current_section
         ));
 
         // Expect next section got enabled
         assert!(matches!(
             sections_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            SectionsServiceMessage::Enable(expected_next_section)
+            SectionsServiceMessage::Enable(next_section) if next_section == expected_next_section
         ));
 
         // Expect section alarm is set

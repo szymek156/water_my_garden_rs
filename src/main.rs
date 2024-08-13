@@ -1,20 +1,12 @@
 mod clock;
+mod http_server;
 mod sections;
 mod watering;
 mod wifi;
-mod http_server;
 
 use clock::ClockService;
 
-use esp_idf_svc::{
-    eventloop::EspSystemEventLoop,
-    hal::prelude::*,
-    http::{
-        server::{Configuration, EspHttpServer},
-        Method,
-    },
-    io::Write as _,
-};
+use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::prelude::*};
 use http_server::setup_http_server;
 use sections::Sections;
 use watering::WateringService;
@@ -99,7 +91,8 @@ fn run() {
     let clock_service_channel = clock_service.start();
     let sections_service_channel = sections_service.start();
 
-    let watering_service = WateringService::new(clock_service_channel.clone(), sections_service_channel);
+    let watering_service =
+        WateringService::new(clock_service_channel.clone(), sections_service_channel);
     let watering_service_channel = watering_service.start();
 
     // Set the HTTP server
@@ -107,7 +100,6 @@ fn run() {
     // Never call dtor of the server
     core::mem::forget(http_server);
 }
-
 
 fn say_hello() {
     log::info!(
