@@ -12,6 +12,7 @@ use esp_idf_svc::hal::{
     task::queue::Queue,
 };
 use log::{error, info};
+use serde::Serialize;
 use std::sync::mpsc::{Receiver, Sender};
 
 use crate::{sections::SectionDuration, watering::WateringServiceMessage};
@@ -23,7 +24,7 @@ pub struct ClockService<IntGPIO: IOPin> {
     watering_alarm_subscribers: Vec<Sender<WateringServiceMessage>>,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Debug)]
 pub struct ClockStatus {
     // alarm1 when
     // alarm2 when
@@ -128,15 +129,21 @@ impl<IntGPIO: IOPin> ClockService<IntGPIO> {
                         let subscribers = self
                             .watering_alarm_subscribers
                             .into_iter()
-                            .filter(|tx| tx.send(WateringServiceMessage::WateringAlarmFired).is_ok())
+                            .filter(|tx| {
+                                tx.send(WateringServiceMessage::WateringAlarmFired).is_ok()
+                            })
                             .collect();
                         self.watering_alarm_subscribers = subscribers;
                     }
 
                     self.enable_interrupt();
                 }
-                ClockServiceMessage::SubscribeForSectionAlarm(tx) => self.section_alarm_subscribers.push(tx),
-                ClockServiceMessage::SubscribeForWateringAlarm(tx) => self.watering_alarm_subscribers.push(tx),
+                ClockServiceMessage::SubscribeForSectionAlarm(tx) => {
+                    self.section_alarm_subscribers.push(tx)
+                }
+                ClockServiceMessage::SubscribeForWateringAlarm(tx) => {
+                    self.watering_alarm_subscribers.push(tx)
+                }
                 ClockServiceMessage::SetSectionAlarmAfter(offset) => {
                     info!("Handling Alarm1 - Section with offset {offset}");
                     let now = self.get_current_datetime().unwrap();

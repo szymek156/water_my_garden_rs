@@ -1,3 +1,14 @@
+# TODO:
+- describe arch
+- async with embassy maybe?
+- software watchdog for missed section interrupt
+- store config on flash
+- OTA updates
+- auth requests
+- https
+- typestate pattern for scheduled watering and ad-hoc watering
+- make tests running on host, not on the target
+- make mocks for hardware, do int tests with it
 # source of truth
 https://docs.esp-rs.org/book/writing-your-own-application/
 https://docs.esp-rs.org/std-training/

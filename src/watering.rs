@@ -8,22 +8,35 @@ use std::{
 use chrono::NaiveTime;
 
 use log::{debug, info};
+use serde::Serialize;
 
 use crate::{
     clock::{ClockServiceChannel, ClockServiceMessage},
     sections::{Section, SectionDuration, SectionsServiceChannel},
 };
 
+#[derive(Debug, Serialize)]
+pub struct WateringStatus {
+    pub section_durations: HashMap<Section, SectionDuration>,
+}
+
 #[derive(Debug)]
 pub enum WateringServiceMessage {
+    /// Comes from the RTC, section watering should be ended
     SectionAlarmFired,
+    /// Comes from the RTC, watering of all sections should start
     WateringAlarmFired,
+    /// Schedule watering of all sections
     StartWateringAt(NaiveTime),
+    /// Set section duration for daily schedule
     SetSectionDuration(Section, SectionDuration),
     /// Enable section right now, for given duration
     EnableSectionFor(Section, SectionDuration),
     /// Close valves for all sections
     CloseAllValves,
+    // Disable Watering Alarm
+    DisableWatering,
+    GetStatus(Sender<WateringStatus>),
 }
 pub type WateringServiceChannel = Sender<WateringServiceMessage>;
 
@@ -85,7 +98,7 @@ impl WateringService {
 
                 if self.out_of_schedule_watering != Section::None {
                     self.close_all_valves();
-                    self.disable_section_timer();
+                    self.disable_section_alarm();
                     self.out_of_schedule_watering = Section::None;
                     return;
                 }
@@ -126,14 +139,22 @@ impl WateringService {
 
                 if duration.is_zero() {
                     self.close_all_valves();
-                    self.disable_section_timer();
+                    self.disable_section_alarm();
                 }
 
-                self.set_section_timer(&duration);
+                self.set_section_alarm(&duration);
                 self.out_of_schedule_watering = section;
             }
             WateringServiceMessage::CloseAllValves => {
                 self.close_all_valves();
+            }
+            WateringServiceMessage::DisableWatering => self.disable_watering_alarm(),
+            WateringServiceMessage::GetStatus(tx) => {
+                let status = WateringStatus {
+                    section_durations: self.section_durations.clone(),
+                };
+                log::info!("Reporting watering status {status:#?}");
+                tx.send(status).unwrap();
             }
         }
     }
@@ -160,7 +181,7 @@ impl WateringService {
         if self.current_section == Section::None {
             info!("Watering complete");
             // disable alarm2
-            self.disable_section_timer();
+            self.disable_section_alarm();
             // disable watchdog
             return;
         }
@@ -178,18 +199,25 @@ impl WateringService {
         }
 
         self.enable_section(self.current_section);
-        self.set_section_timer(section_duration);
+        self.set_section_alarm(section_duration);
         // reload watchdog
     }
 
-    fn disable_section_timer(&self) {
+    fn disable_watering_alarm(&self) {
+        info!("Disabling watering alarm");
+        self.clock_tx
+            .send(ClockServiceMessage::DisableWateringAlarm)
+            .unwrap();
+    }
+
+    fn disable_section_alarm(&self) {
         info!("Disabling section alarm");
         self.clock_tx
             .send(ClockServiceMessage::DisableSectionAlarm)
             .unwrap();
     }
 
-    fn set_section_timer(&self, section_duration: &SectionDuration) {
+    fn set_section_alarm(&self, section_duration: &SectionDuration) {
         info!("Arming section alarm {}", section_duration);
         // Arm alarm2 for that section
         self.clock_tx

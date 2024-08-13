@@ -1,7 +1,7 @@
 //! Abstraction over hardware for enabling/disabling sections
 
 use std::{
-    fmt::Display,
+    fmt::{Debug, Display},
     str::FromStr,
     sync::mpsc::{Receiver, Sender},
 };
@@ -13,9 +13,9 @@ use esp_idf_svc::hal::{
     gpio::{Output, OutputPin, PinDriver},
     peripheral::Peripheral,
 };
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
-#[derive(Deserialize, Debug, PartialEq, Sequence, Hash, Eq, Copy, Clone)]
+#[derive(Serialize,Deserialize, Debug, PartialEq, Sequence, Hash, Eq, Copy, Clone)]
 pub enum Section {
     Vegs,
     Flowers,
@@ -26,7 +26,7 @@ pub enum Section {
 
 // TODO: tests
 /// Newtype that gets reasonable values for section watering duration - non negative and less than 2 hours
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq)]
 pub struct SectionDuration(TimeDelta);
 
 /// Lets assume valid format is minutes, like "90" is 1 hour 30 mins
@@ -40,6 +40,14 @@ impl<'de> Deserialize<'de> for SectionDuration {
             SectionDuration::new(TimeDelta::minutes(minutes)).map_err(serde::de::Error::custom)?;
 
         Ok(duration)
+    }
+}
+
+impl Serialize for SectionDuration {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer {
+        serializer.serialize_i64(self.0.num_minutes())
     }
 }
 
@@ -70,6 +78,12 @@ impl TryInto<SectionDuration> for TimeDelta {
 
     fn try_into(self) -> std::result::Result<SectionDuration, Self::Error> {
         SectionDuration::new(self)
+    }
+}
+
+impl Debug for SectionDuration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <SectionDuration as Display>::fmt(&self, f)
     }
 }
 

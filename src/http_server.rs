@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use chrono::NaiveTime;
 use embedded_svc::{
     http::{Headers, Method},
@@ -13,11 +15,12 @@ use esp_idf_svc::{
 };
 use log::info;
 use serde::{de::DeserializeOwned, Deserialize};
+use serde_json::json;
 
 use crate::{
     clock::ClockServiceChannel,
     sections::{Section, SectionDuration},
-    watering::WateringServiceChannel,
+    watering::{WateringServiceChannel, WateringServiceMessage},
 };
 use anyhow::{anyhow, Context};
 
@@ -40,11 +43,28 @@ pub fn setup_http_server(
 
     {
         let watering_tx = watering_service_channel.clone();
+        let clock_tx = clock_service_channel.clone();
+        server
+            .fn_handler("/status", Method::Get, move |req| status(req, &watering_tx, &clock_tx))
+            .context("handler /status")?;
+    }
+
+    {
+        let watering_tx = watering_service_channel.clone();
         server
             .fn_handler("/start_watering_at", Method::Post, move |req| {
                 handle_start_watering_at(req, &watering_tx)
             })
             .context("handler /start_watering_at")?;
+    }
+
+    {
+        let watering_tx = watering_service_channel.clone();
+        server
+            .fn_handler("/disable_watering", Method::Post, move |req| {
+                disable_watering(req, &watering_tx)
+            })
+            .context("handler /disable_watering")?;
     }
 
     {
@@ -73,11 +93,48 @@ pub fn setup_http_server(
             })
             .context("handler /enable_section_for")?;
     }
+
     Ok(server)
 }
 
 // Max payload length
 const MAX_LEN: usize = 128;
+
+fn status(
+    req: Request<&mut EspHttpConnection<'_>>,
+    watering_tx: &WateringServiceChannel,
+    clock_tx: &ClockServiceChannel
+) -> anyhow::Result<()> {
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    watering_tx.send(WateringServiceMessage::GetStatus(tx))?;
+
+    let Ok(watering_status) = rx.recv_timeout(Duration::from_secs(10)) else {
+        req.into_status_response(500)?
+            .write_all("Failed to fetch watering service  status".as_bytes())?;
+        return Ok(());
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    clock_tx.send(crate::clock::ClockServiceMessage::GetStatus(tx))?;
+
+
+    let Ok(clock_status) = rx.recv_timeout(Duration::from_secs(10)) else {
+        req.into_status_response(500)?
+            .write_all("Failed to fetch Clock service status".as_bytes())?;
+        return Ok(());
+    };
+
+    let system_status = json!({
+        "watering": watering_status,
+        "clock": clock_status
+    });
+
+    req.into_ok_response()?
+        .write_all(format!("{system_status:#}").as_bytes())?;
+
+    Ok(())
+}
 
 #[derive(Deserialize)]
 struct StartWateringAtReq {
@@ -90,9 +147,7 @@ fn handle_start_watering_at(
 ) -> anyhow::Result<()> {
     match get_body::<StartWateringAtReq>(&mut req) {
         Ok(body) => {
-            watering_tx.send(crate::watering::WateringServiceMessage::StartWateringAt(
-                body.time,
-            ))?;
+            watering_tx.send(WateringServiceMessage::StartWateringAt(body.time))?;
             req.into_ok_response()?.write_all("OK!".as_bytes())?;
         }
         Err(err) => {
@@ -116,7 +171,7 @@ fn set_section_duration(
 ) -> anyhow::Result<()> {
     match get_body::<SetSectionDurationReq>(&mut req) {
         Ok(body) => {
-            watering_tx.send(crate::watering::WateringServiceMessage::SetSectionDuration(
+            watering_tx.send(WateringServiceMessage::SetSectionDuration(
                 body.section,
                 body.duration,
             ))?;
@@ -131,11 +186,21 @@ fn set_section_duration(
     Ok(())
 }
 
+fn disable_watering(
+    req: Request<&mut EspHttpConnection<'_>>,
+    watering_tx: &WateringServiceChannel,
+) -> anyhow::Result<()> {
+    watering_tx.send(WateringServiceMessage::DisableWatering)?;
+    req.into_ok_response()?.write_all("OK!".as_bytes())?;
+
+    Ok(())
+}
+
 fn close_all_valves(
     req: Request<&mut EspHttpConnection<'_>>,
     watering_tx: &WateringServiceChannel,
 ) -> anyhow::Result<()> {
-    watering_tx.send(crate::watering::WateringServiceMessage::CloseAllValves)?;
+    watering_tx.send(WateringServiceMessage::CloseAllValves)?;
     req.into_ok_response()?.write_all("OK!".as_bytes())?;
 
     Ok(())
@@ -153,7 +218,7 @@ fn enable_section_for(
 ) -> anyhow::Result<()> {
     match get_body::<EnableSectionForReq>(&mut req) {
         Ok(body) => {
-            watering_tx.send(crate::watering::WateringServiceMessage::EnableSectionFor(
+            watering_tx.send(WateringServiceMessage::EnableSectionFor(
                 body.section,
                 body.duration,
             ))?;
