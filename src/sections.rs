@@ -144,6 +144,7 @@ impl<VegsGPIO: OutputPin, TerraceGPIO: OutputPin, FlowersGPIO: OutputPin, GrassG
         while let Ok(msg) = rx.recv() {
             match msg {
                 SectionsServiceMessage::Enable(section) => {
+                    log::info!("Enabling {section:?}");
                     match section {
                         Section::Vegs => self.vegs.set_high(),
                         Section::Flowers => self.flowers.set_high(),
@@ -154,6 +155,7 @@ impl<VegsGPIO: OutputPin, TerraceGPIO: OutputPin, FlowersGPIO: OutputPin, GrassG
                     .unwrap();
                 }
                 SectionsServiceMessage::Disable(section) => {
+                    log::info!("Disabling {section:?}");
                     match section {
                         Section::Vegs => self.vegs.set_low(),
                         Section::Flowers => self.flowers.set_low(),

@@ -19,8 +19,8 @@ use crate::{sections::SectionDuration, watering::WateringServiceMessage};
 pub struct ClockService<IntGPIO: IOPin> {
     rtc: Ds323x<I2cInterface<I2cDriver<'static>>, DS3231>,
     int_pin: PinDriver<'static, IntGPIO, Input>,
-    alarm1_subscribers: Vec<Sender<WateringServiceMessage>>,
-    alarm2_subscribers: Vec<Sender<WateringServiceMessage>>,
+    section_alarm_subscribers: Vec<Sender<WateringServiceMessage>>,
+    watering_alarm_subscribers: Vec<Sender<WateringServiceMessage>>,
 }
 
 #[derive(Debug)]
@@ -36,14 +36,16 @@ pub struct ClockStatus {
 #[derive(Debug, Clone)]
 pub enum ClockServiceMessage {
     InterruptArrived(u32),
-    SubscribeForAlarm1(Sender<WateringServiceMessage>),
-    SubscribeForAlarm2(Sender<WateringServiceMessage>),
-    /// Set exact time HH:MM::SS
-    SetAlarm1(NaiveTime),
-    /// Set alarm in some time in the future referring from current time. E.g. in 15 minutes
-    SetAlarm2After(SectionDuration),
-    DisableAlarm1,
-    DisableAlarm2,
+    /// Use alarm1 for section notification - it has H:M:S resolution, good for requests like "water section for 10 minutes from now"
+    SubscribeForSectionAlarm(Sender<WateringServiceMessage>),
+    /// Use alarm2 for watering notification - it has H:M resolution, it's enough for "set watering on 20:30"
+    SubscribeForWateringAlarm(Sender<WateringServiceMessage>),
+    /// Set section alarm in some time in the future starting from now. E.g. in 15 minutes
+    SetSectionAlarmAfter(SectionDuration),
+    /// Set watering to exact time HH:MM::00
+    SetWateringAlarmAt(NaiveTime),
+    DisableSectionAlarm,
+    DisableWateringAlarm,
     GetStatus(Sender<ClockStatus>),
     GetDateTime(Sender<NaiveDateTime>),
 }
@@ -86,8 +88,8 @@ impl<IntGPIO: IOPin> ClockService<IntGPIO> {
         Ok(Self {
             rtc,
             int_pin,
-            alarm1_subscribers: vec![],
-            alarm2_subscribers: vec![],
+            section_alarm_subscribers: vec![],
+            watering_alarm_subscribers: vec![],
         })
     }
 
@@ -115,45 +117,45 @@ impl<IntGPIO: IOPin> ClockService<IntGPIO> {
                     // Try to send to the subscribers, if fails, it means rx "unsubscribed", filter such entries
                     if self.rtc.has_alarm1_matched().unwrap() {
                         let subscribers = self
-                            .alarm1_subscribers
+                            .section_alarm_subscribers
                             .into_iter()
-                            .filter(|tx| tx.send(WateringServiceMessage::Alarm1Fired).is_ok())
+                            .filter(|tx| tx.send(WateringServiceMessage::SectionAlarmFired).is_ok())
                             .collect();
-                        self.alarm1_subscribers = subscribers;
+                        self.section_alarm_subscribers = subscribers;
                     }
 
                     if self.rtc.has_alarm2_matched().unwrap() {
                         let subscribers = self
-                            .alarm2_subscribers
+                            .watering_alarm_subscribers
                             .into_iter()
-                            .filter(|tx| tx.send(WateringServiceMessage::Alarm2Fired).is_ok())
+                            .filter(|tx| tx.send(WateringServiceMessage::WateringAlarmFired).is_ok())
                             .collect();
-                        self.alarm2_subscribers = subscribers;
+                        self.watering_alarm_subscribers = subscribers;
                     }
 
                     self.enable_interrupt();
                 }
-                ClockServiceMessage::SubscribeForAlarm1(tx) => self.alarm1_subscribers.push(tx),
-                ClockServiceMessage::SubscribeForAlarm2(tx) => self.alarm2_subscribers.push(tx),
-                ClockServiceMessage::SetAlarm1(when) => {
-                    info!("Setting Alarm1 to {when}");
-                    self.rtc.set_alarm1_hms(when).unwrap();
-                    self.rtc.enable_alarm1_interrupts().unwrap();
-                }
-                ClockServiceMessage::SetAlarm2After(offset) => {
-                    info!("Handling Alarm2 with offset {offset}");
+                ClockServiceMessage::SubscribeForSectionAlarm(tx) => self.section_alarm_subscribers.push(tx),
+                ClockServiceMessage::SubscribeForWateringAlarm(tx) => self.watering_alarm_subscribers.push(tx),
+                ClockServiceMessage::SetSectionAlarmAfter(offset) => {
+                    info!("Handling Alarm1 - Section with offset {offset}");
                     let now = self.get_current_datetime().unwrap();
                     let future = now.checked_add_signed(offset.into_inner()).unwrap();
-                    info!("Setting Alarm2 to {future}");
-                    self.rtc.set_alarm2_hm(future.time()).unwrap();
+                    info!("Setting Alarm1 - Section to {future}");
+                    self.rtc.set_alarm1_hms(future.time()).unwrap();
+                    self.rtc.enable_alarm1_interrupts().unwrap();
+                }
+                ClockServiceMessage::SetWateringAlarmAt(when) => {
+                    info!("Setting Alarm2 - Watering to {when}");
+                    self.rtc.set_alarm2_hm(when).unwrap();
                     self.rtc.enable_alarm2_interrupts().unwrap();
                 }
-                ClockServiceMessage::DisableAlarm1 => {
-                    info!("Disabling Alarm1");
+                ClockServiceMessage::DisableSectionAlarm => {
+                    info!("Disabling Alarm1 - Section");
                     self.rtc.disable_alarm1_interrupts().unwrap();
                 }
-                ClockServiceMessage::DisableAlarm2 => {
-                    info!("Disabling Alarm2");
+                ClockServiceMessage::DisableWateringAlarm => {
+                    info!("Disabling Alarm2 - Watering");
                     self.rtc.disable_alarm2_interrupts().unwrap();
                 }
                 ClockServiceMessage::GetStatus(tx) => {

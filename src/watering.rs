@@ -16,8 +16,8 @@ use crate::{
 
 #[derive(Debug)]
 pub enum WateringServiceMessage {
-    Alarm1Fired,
-    Alarm2Fired,
+    SectionAlarmFired,
+    WateringAlarmFired,
     StartWateringAt(NaiveTime),
     SetSectionDuration(Section, SectionDuration),
     /// Enable section right now, for given duration
@@ -57,7 +57,11 @@ impl WateringService {
         let (tx, rx) = channel();
 
         self.clock_tx
-            .send(ClockServiceMessage::SubscribeForAlarm1(tx.clone()))
+            .send(ClockServiceMessage::SubscribeForSectionAlarm(tx.clone()))
+            .unwrap();
+
+        self.clock_tx
+            .send(ClockServiceMessage::SubscribeForWateringAlarm(tx.clone()))
             .unwrap();
 
         // Create Watering service
@@ -76,21 +80,8 @@ impl WateringService {
         log::debug!("Handling {msg:?}");
 
         match msg {
-            WateringServiceMessage::Alarm1Fired => {
-                info!("Got notification about alarm1");
-                // TODO: Sanity call
-                // self.close_all_valves();
-
-                // TODO: out of schedule watering
-                // start watchdog
-
-                // There should be no watering in progress
-                assert_eq!(self.current_section, Section::None);
-
-                self.water_next_section()
-            }
-            WateringServiceMessage::Alarm2Fired => {
-                info!("Got notification about alarm2");
+            WateringServiceMessage::SectionAlarmFired => {
+                info!("Got notification about section alarm");
 
                 if self.out_of_schedule_watering != Section::None {
                     self.close_all_valves();
@@ -103,10 +94,23 @@ impl WateringService {
                 assert_ne!(self.current_section, Section::None);
                 self.water_next_section()
             }
+            WateringServiceMessage::WateringAlarmFired => {
+                info!("Got notification about watering alarm");
+                // TODO: Sanity call
+                // self.close_all_valves();
+
+                // TODO: out of schedule watering
+                // start watchdog
+
+                // There should be no watering in progress
+                assert_eq!(self.current_section, Section::None);
+
+                self.water_next_section()
+            }
             WateringServiceMessage::StartWateringAt(when) => {
                 info!("Setting up watering on {when}");
                 self.clock_tx
-                    .send(ClockServiceMessage::SetAlarm1(when))
+                    .send(ClockServiceMessage::SetWateringAlarmAt(when))
                     .unwrap();
             }
             WateringServiceMessage::SetSectionDuration(section, duration) => {
@@ -179,17 +183,17 @@ impl WateringService {
     }
 
     fn disable_section_timer(&self) {
-        info!("Clearing alarm2");
+        info!("Disabling section alarm");
         self.clock_tx
-            .send(ClockServiceMessage::DisableAlarm2)
+            .send(ClockServiceMessage::DisableSectionAlarm)
             .unwrap();
     }
 
     fn set_section_timer(&self, section_duration: &SectionDuration) {
-        info!("Arming alarm2 {}", section_duration);
+        info!("Arming section alarm {}", section_duration);
         // Arm alarm2 for that section
         self.clock_tx
-            .send(ClockServiceMessage::SetAlarm2After(*section_duration))
+            .send(ClockServiceMessage::SetSectionAlarmAfter(*section_duration))
             .unwrap();
     }
 
@@ -236,7 +240,7 @@ pub mod tests {
                         ClockServiceMessage::GetDateTime(tx) => {
                             tx.send(now).unwrap();
                         }
-                        ClockServiceMessage::SetAlarm2After(offset) => {
+                        ClockServiceMessage::SetSectionAlarmAfter(offset) => {
                             let future = now.checked_add_signed(offset.into_inner()).unwrap();
                             now = future;
                         }
@@ -273,7 +277,7 @@ pub mod tests {
         .into();
 
         // Simulate interrupt from the clock - watering should start
-        watering.handle_msg(WateringServiceMessage::Alarm1Fired);
+        watering.handle_msg(WateringServiceMessage::WateringAlarmFired);
 
         // Expect Vegs to be first
         verify_moved_to_next_section(
@@ -286,7 +290,7 @@ pub mod tests {
         );
 
         // Simulate vegs finished
-        watering.handle_msg(WateringServiceMessage::Alarm2Fired);
+        watering.handle_msg(WateringServiceMessage::SectionAlarmFired);
 
         verify_moved_to_next_section(
             Section::Vegs,
@@ -298,7 +302,7 @@ pub mod tests {
         );
 
         // Simulate flowers finished
-        watering.handle_msg(WateringServiceMessage::Alarm2Fired);
+        watering.handle_msg(WateringServiceMessage::SectionAlarmFired);
         verify_moved_to_next_section(
             Section::Flowers,
             watering.current_section,
@@ -309,7 +313,7 @@ pub mod tests {
         );
 
         // Simulate grass finished
-        watering.handle_msg(WateringServiceMessage::Alarm2Fired);
+        watering.handle_msg(WateringServiceMessage::SectionAlarmFired);
         verify_moved_to_next_section(
             Section::Grass,
             watering.current_section,
@@ -320,7 +324,7 @@ pub mod tests {
         );
 
         // Simulate terrace finished
-        watering.handle_msg(WateringServiceMessage::Alarm2Fired);
+        watering.handle_msg(WateringServiceMessage::SectionAlarmFired);
 
         // Expect watering moved to None section
         assert_eq!(watering.current_section, Section::None);
@@ -331,10 +335,10 @@ pub mod tests {
             SectionsServiceMessage::Disable(Section::Terrace)
         ));
 
-        // Expect alarm2 is disabled
+        // Expect section alarm is disabled
         assert!(matches!(
             clock_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            ClockServiceMessage::DisableAlarm2
+            ClockServiceMessage::DisableSectionAlarm
         ));
     }
 
@@ -362,7 +366,7 @@ pub mod tests {
         .into();
 
         // Simulate interrupt from the clock - watering should start
-        watering.handle_msg(WateringServiceMessage::Alarm1Fired);
+        watering.handle_msg(WateringServiceMessage::WateringAlarmFired);
 
         // Expect Vegs to be first
         verify_moved_to_next_section(
@@ -375,7 +379,7 @@ pub mod tests {
         );
 
         // Simulate vegs finished, should skip flowers, go to grass
-        watering.handle_msg(WateringServiceMessage::Alarm2Fired);
+        watering.handle_msg(WateringServiceMessage::SectionAlarmFired);
 
         // Expect watering moved to next valid section - grass
         assert_eq!(watering.current_section, Section::Grass);
@@ -400,14 +404,14 @@ pub mod tests {
 
         // Expect alarm2 is set
         match clock_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
-            ClockServiceMessage::SetAlarm2After(offset) => {
+            ClockServiceMessage::SetSectionAlarmAfter(offset) => {
                 assert_eq!(offset, grass_duration);
             }
             _ => panic!("Unexpected message"),
         }
 
         // Simulate grass finished, skip terrace, finish watering
-        watering.handle_msg(WateringServiceMessage::Alarm2Fired);
+        watering.handle_msg(WateringServiceMessage::SectionAlarmFired);
 
         // Expect watering moved to None section
         assert_eq!(watering.current_section, Section::None);
@@ -423,10 +427,10 @@ pub mod tests {
             SectionsServiceMessage::Disable(Section::Terrace)
         ));
 
-        // Expect alarm2 is disabled
+        // Expect section alarm is disabled
         assert!(matches!(
             clock_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            ClockServiceMessage::DisableAlarm2
+            ClockServiceMessage::DisableSectionAlarm
         ));
     }
 
@@ -452,7 +456,7 @@ pub mod tests {
         .into();
 
         // Simulate interrupt from the clock - watering should start
-        watering.handle_msg(WateringServiceMessage::Alarm1Fired);
+        watering.handle_msg(WateringServiceMessage::WateringAlarmFired);
 
         // Expect none of the sections triggered
         // Expect watering moved to next valid section - None
@@ -486,10 +490,10 @@ pub mod tests {
             SectionsServiceMessage::Disable(Section::Terrace)
         ));
 
-        // Expect alarm2 is disabled
+        // Expect section alarm is disabled
         assert!(matches!(
             clock_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            ClockServiceMessage::DisableAlarm2
+            ClockServiceMessage::DisableSectionAlarm
         ));
     }
 
@@ -516,9 +520,9 @@ pub mod tests {
             SectionsServiceMessage::Enable(expected_next_section)
         ));
 
-        // Expect alarm2 is set
+        // Expect section alarm is set
         match clock_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
-            ClockServiceMessage::SetAlarm2After(offset) => {
+            ClockServiceMessage::SetSectionAlarmAfter(offset) => {
                 assert_eq!(expected_duration, offset)
             }
             _ => panic!("Unexpected message"),
