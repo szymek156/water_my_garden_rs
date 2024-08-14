@@ -12,15 +12,21 @@ use esp_idf_svc::{
     io::Write as _,
 };
 use log::info;
-use serde::{de::DeserializeOwned, Deserialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    clock::ClockServiceChannel,
+    clock::{ClockServiceChannel, ClockStatus},
     sections::{Section, SectionDuration},
-    watering::{WateringServiceChannel, WateringServiceMessage},
+    watering::{WateringServiceChannel, WateringServiceMessage, WateringStatus},
 };
 use anyhow::{anyhow, Context};
+
+#[derive(Debug, Serialize)]
+pub struct SystemStatus {
+    watering: WateringStatus,
+    clock: ClockStatus,
+}
 
 pub fn setup_http_server(
     clock_service_channel: ClockServiceChannel,
@@ -105,34 +111,45 @@ fn status(
     watering_tx: &WateringServiceChannel,
     clock_tx: &ClockServiceChannel,
 ) -> anyhow::Result<()> {
-    let (tx, rx) = std::sync::mpsc::channel();
+    match get_system_status(watering_tx, clock_tx) {
+        Ok(status) => {
+            let system_json = serde_json::to_string_pretty(&status)?;
 
-    watering_tx.send(WateringServiceMessage::GetStatus(tx))?;
-
-    let Ok(watering_status) = rx.recv_timeout(Duration::from_secs(10)) else {
-        req.into_status_response(500)?
-            .write_all("Failed to fetch watering service  status".as_bytes())?;
-        return Ok(());
+            req.into_ok_response()?.write_all(system_json.as_bytes())?;
+        }
+        Err(err) => req
+            .into_status_response(500)?
+            .write_all(err.to_string().as_bytes())?,
     };
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    clock_tx.send(crate::clock::ClockServiceMessage::GetStatus(tx))?;
-
-    let Ok(clock_status) = rx.recv_timeout(Duration::from_secs(10)) else {
-        req.into_status_response(500)?
-            .write_all("Failed to fetch Clock service status".as_bytes())?;
-        return Ok(());
-    };
-
-    let system_status = json!({
-        "watering": watering_status,
-        "clock": clock_status
-    });
-
-    req.into_ok_response()?
-        .write_all(format!("{system_status:#}").as_bytes())?;
 
     Ok(())
+}
+
+fn get_system_status(
+    watering_tx: &WateringServiceChannel,
+    clock_tx: &ClockServiceChannel,
+) -> anyhow::Result<SystemStatus> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    watering_tx
+        .send(WateringServiceMessage::GetStatus(tx))
+        .context("while sending get status to watering service")?;
+
+    let watering_status = rx
+        .recv_timeout(Duration::from_secs(10))
+        .context("while receiving status from watering service")?;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    clock_tx
+        .send(crate::clock::ClockServiceMessage::GetStatus(tx))
+        .context("while sending get status to clock service")?;
+    let clock_status = rx
+        .recv_timeout(Duration::from_secs(10))
+        .context("while receiving status from clock service")?;
+
+    Ok(SystemStatus {
+        watering: watering_status,
+        clock: clock_status,
+    })
 }
 
 #[derive(Deserialize)]
@@ -174,6 +191,7 @@ fn set_section_duration(
                 body.section,
                 body.duration,
             ))?;
+
             req.into_ok_response()?.write_all("OK!".as_bytes())?;
         }
         Err(err) => {
