@@ -9,7 +9,7 @@ use clock::ClockService;
 use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::prelude::*};
 use http_server::setup_http_server;
 use sections::Sections;
-use watering::WateringService;
+use watering::OnScheduleWatering;
 use wifi::connect_to_wifi;
 
 use std::{thread::sleep, time::Duration};
@@ -92,7 +92,7 @@ fn run() {
     let sections_service_channel = sections_service.start();
 
     let watering_service =
-        WateringService::new(clock_service_channel.clone(), sections_service_channel);
+        OnScheduleWatering::new(clock_service_channel.clone(), sections_service_channel);
     let watering_service_channel = watering_service.start();
 
     // Set the HTTP server

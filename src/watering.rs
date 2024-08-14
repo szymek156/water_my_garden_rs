@@ -40,76 +40,129 @@ pub enum WateringServiceMessage {
 }
 pub type WateringServiceChannel = Sender<WateringServiceMessage>;
 
-pub struct WateringService {
+trait HandleMessage {
+    /// This is pure runtime dispatch, we don't know what state comes in to handle the message (Scheduled or AdHoc),
+    /// and we don't know what is state transition. Hence both, self return value are boxed.
+    fn handle_message(self: Box<Self>, msg: WateringServiceMessage) -> Box<dyn HandleMessage>;
+}
+
+struct WateringState {
     clock_tx: ClockServiceChannel,
     sections_tx: SectionsServiceChannel,
     // TODO: watchdog for section opening
     current_section: Section,
     section_durations: HashMap<Section, SectionDuration>,
-    /// Indicates whether section is watered out of schedule
-    // TODO: sounds like a typestate pattern
-    out_of_schedule_watering: Section,
+}
+/// Watering that gets triggered by the armed WateringClock, will go through all enabled sections
+pub struct OnScheduleWatering {
+    /// State shall be moved across states, make it cheap to copy by boxing it
+    state: Box<WateringState>,
 }
 
-trait HandleMessage {
-    fn handle_start_watering_at(self: Box<Self>, when: NaiveTime) -> Box<dyn HandleMessage>;
-    fn handle_section_alarm_fired(self: Box<Self>) -> Box<dyn HandleMessage>;
+/// Watering requested by the user to happen immediately for given section
+pub struct AdHocSectionWatering {
+    state: Box<WateringState>,
 }
-pub struct AdHocWatering {}
 
-impl HandleMessage for AdHocWatering {
-    fn handle_start_watering_at(self: Box<Self>, when: NaiveTime) -> Box<dyn HandleMessage> {
-        self
-    }
-
-    fn handle_section_alarm_fired(self: Box<Self>) -> Box<dyn HandleMessage> {
+impl HandleMessage for AdHocSectionWatering {
+    fn handle_message(self: Box<Self>, msg: WateringServiceMessage) -> Box<dyn HandleMessage> {
         self
     }
 }
 
-impl HandleMessage for WateringService {
-    fn handle_start_watering_at(self: Box<Self>, when: NaiveTime) -> Box<dyn HandleMessage> {
-        info!("Setting up watering on {when}");
-        self.clock_tx
-            .send(ClockServiceMessage::SetWateringAlarmAt(when))
-            .unwrap();
+impl HandleMessage for OnScheduleWatering {
+    fn handle_message(mut self: Box<Self>, msg: WateringServiceMessage) -> Box<dyn HandleMessage> {
+        match msg {
+            WateringServiceMessage::SectionAlarmFired => {
+                info!("Got notification about section alarm");
 
-        Box::new(AdHocWatering {})
-    }
+                // This alarm should be assigned to some section
+                assert_ne!(self.state.current_section, Section::None);
+                self.water_next_section()
+            }
+            WateringServiceMessage::WateringAlarmFired => {
+                info!("Got notification about watering alarm");
+                // TODO: Sanity call
+                // self.close_all_valves();
+                // start watchdog
 
-    fn handle_section_alarm_fired(mut self: Box<Self>) -> Box<dyn HandleMessage> {
-        info!("Got notification about section alarm");
-        // This alarm should be assigned to some section
-        assert_ne!(self.current_section, Section::None);
-        self.water_next_section();
+                // There should be no watering in progress
+                assert_eq!(self.state.current_section, Section::None);
+
+                self.water_next_section()
+            }
+            WateringServiceMessage::StartWateringAt(when) => {
+                info!("Setting up watering on {when}");
+                self.state
+                    .clock_tx
+                    .send(ClockServiceMessage::SetWateringAlarmAt(when))
+                    .unwrap();
+            }
+            WateringServiceMessage::SetSectionDuration(section, duration) => {
+                info!("Setting up section {section:?} for {duration}");
+                let _ = self.state.section_durations.insert(section, duration);
+            }
+            WateringServiceMessage::EnableSectionFor(section, duration) => {
+                info!("Ad-hoc watering of {section:?}");
+                // TODO: reject if watering in progress
+                // TODO: handle that in AdHoc state
+                // if self.out_of_schedule_watering != Section::None {
+                //     self.close_all_valves();
+                // }
+
+                // if duration.is_zero() {
+                //     self.close_all_valves();
+                //     self.disable_section_alarm();
+                // }
+
+                // self.set_section_alarm(&duration);
+
+                return Box::new(AdHocSectionWatering { state: self.state });
+            }
+            WateringServiceMessage::CloseAllValves => {
+                self.close_all_valves();
+            }
+            WateringServiceMessage::DisableWatering => self.disable_watering_alarm(),
+            WateringServiceMessage::GetStatus(tx) => {
+                let status = WateringStatus {
+                    section_durations: self.state.section_durations.clone(),
+                };
+                log::info!("Reporting watering status {status:#?}");
+                tx.send(status).unwrap();
+            }
+        }
 
         self
     }
 }
 
-impl WateringService {
+impl OnScheduleWatering {
     pub fn new(clock_tx: ClockServiceChannel, sections_tx: SectionsServiceChannel) -> Self {
         Self {
-            clock_tx,
-            sections_tx,
-            current_section: Section::None,
-            out_of_schedule_watering: Section::None,
-            section_durations: enum_iterator::all::<Section>()
-                .map(|section| (section, SectionDuration::default()))
-                .collect::<HashMap<_, _>>(),
+            state: Box::new(WateringState {
+                clock_tx,
+                sections_tx,
+                current_section: Section::None,
+
+                section_durations: enum_iterator::all::<Section>()
+                    .map(|section| (section, SectionDuration::default()))
+                    .collect::<HashMap<_, _>>(),
+            }),
         }
     }
 
     /// Starts the Watering Service, returns the WateringServiceChannel to communicate with it
-    pub fn start(mut self) -> WateringServiceChannel {
+    pub fn start(self) -> WateringServiceChannel {
         // Create channel that is used to communicate with this service
         let (tx, rx) = channel();
 
-        self.clock_tx
+        self.state
+            .clock_tx
             .send(ClockServiceMessage::SubscribeForSectionAlarm(tx.clone()))
             .unwrap();
 
-        self.clock_tx
+        self.state
+            .clock_tx
             .send(ClockServiceMessage::SubscribeForWateringAlarm(tx.clone()))
             .unwrap();
 
@@ -121,13 +174,14 @@ impl WateringService {
             while let Ok(msg) = rx.recv() {
                 log::debug!("Handling {msg:?}");
 
-                boxed = match msg {
-                    WateringServiceMessage::SectionAlarmFired => boxed.handle_section_alarm_fired(),
-                    WateringServiceMessage::StartWateringAt(when) => {
-                        boxed.handle_start_watering_at(when)
-                    }
-                    _ => todo!(),
-                };
+                // Messages that can come in any order. This is pure runtime dispatch.
+                // So I could't use classic TypeState pattern. Classic version assumes
+                // some deterministic, known during compilation time order. If A -> B -> C...
+                // Here messages can come at any time in any order, static dispatch is useless here.
+                // That's why this version utilizes Box and dynamic dispatch
+                // boxed is the current state, handle_message returns next state, depending on the message
+                // handling result. We are in a loop so boxed needs to be of generic enough type: Box<dyn HandleMessage>
+                boxed = boxed.handle_message(msg);
             }
         });
 
@@ -138,22 +192,23 @@ impl WateringService {
         info!("Closing all valves...");
         for section in enum_iterator::all::<Section>() {
             info!("     {section:?}...");
-            self.sections_tx
+            self.state
+                .sections_tx
                 .send(crate::sections::SectionsServiceMessage::Disable(section))
                 .unwrap();
         }
     }
 
     fn water_next_section(&mut self) {
-        debug!("Disabling {:?}", self.current_section);
+        debug!("Disabling {:?}", self.state.current_section);
 
         // disable current section
-        self.disable_section(self.current_section);
+        self.disable_section(self.state.current_section);
         // feed watchdog
 
-        self.current_section = enum_iterator::next_cycle(&self.current_section);
+        self.state.current_section = enum_iterator::next_cycle(&self.state.current_section);
 
-        if self.current_section == Section::None {
+        if self.state.current_section == Section::None {
             info!("Watering complete");
             // disable alarm2
             self.disable_section_alarm();
@@ -161,33 +216,39 @@ impl WateringService {
             return;
         }
 
-        let section_duration = self.section_durations.get(&self.current_section).unwrap();
+        let section_duration = self
+            .state
+            .section_durations
+            .get(&self.state.current_section)
+            .unwrap();
 
         if section_duration.is_zero() {
             info!(
                 "Section {:?} is disabled, moving to another",
-                self.current_section
+                self.state.current_section
             );
 
             self.water_next_section();
             return;
         }
 
-        self.enable_section(self.current_section);
+        self.enable_section(self.state.current_section);
         self.set_section_alarm(section_duration);
         // reload watchdog
     }
 
     fn disable_watering_alarm(&self) {
         info!("Disabling watering alarm");
-        self.clock_tx
+        self.state
+            .clock_tx
             .send(ClockServiceMessage::DisableWateringAlarm)
             .unwrap();
     }
 
     fn disable_section_alarm(&self) {
         info!("Disabling section alarm");
-        self.clock_tx
+        self.state
+            .clock_tx
             .send(ClockServiceMessage::DisableSectionAlarm)
             .unwrap();
     }
@@ -195,21 +256,24 @@ impl WateringService {
     fn set_section_alarm(&self, section_duration: &SectionDuration) {
         info!("Arming section alarm {}", section_duration);
         // Arm alarm2 for that section
-        self.clock_tx
+        self.state
+            .clock_tx
             .send(ClockServiceMessage::SetSectionAlarmAfter(*section_duration))
             .unwrap();
     }
 
     fn disable_section(&self, section: Section) {
         info!("Disabling {section:?}");
-        self.sections_tx
+        self.state
+            .sections_tx
             .send(crate::sections::SectionsServiceMessage::Disable(section))
             .unwrap();
     }
 
     fn enable_section(&self, section: Section) {
         info!("Enabling {section:?}");
-        self.sections_tx
+        self.state
+            .sections_tx
             .send(crate::sections::SectionsServiceMessage::Enable(section))
             .unwrap();
     }
@@ -261,7 +325,7 @@ pub mod tests {
 
         let (sections_tx, sections_rx) = channel();
 
-        let mut watering = WateringService::new(clock_tx, sections_tx);
+        let mut watering = OnScheduleWatering::new(clock_tx, sections_tx);
 
         // Valid clean state
         assert_eq!(watering.current_section, Section::None);
@@ -352,7 +416,7 @@ pub mod tests {
 
         let (sections_tx, sections_rx) = channel();
 
-        let mut watering = WateringService::new(clock_tx, sections_tx);
+        let mut watering = OnScheduleWatering::new(clock_tx, sections_tx);
 
         // Valid clean state
         assert_eq!(watering.current_section, Section::None);
@@ -444,7 +508,7 @@ pub mod tests {
 
         let (sections_tx, sections_rx) = channel();
 
-        let mut watering = WateringService::new(clock_tx, sections_tx);
+        let mut watering = OnScheduleWatering::new(clock_tx, sections_tx);
 
         // Valid clean state
         assert_eq!(watering.current_section, Section::None);
