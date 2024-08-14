@@ -1,8 +1,8 @@
 mod clock;
 mod http_server;
 mod sections;
-mod watering;
 mod wifi;
+mod watering;
 
 use clock::ClockService;
 

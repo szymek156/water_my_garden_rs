@@ -51,42 +51,6 @@ pub struct WateringService {
     out_of_schedule_watering: Section,
 }
 
-trait HandleMessage {
-    fn handle_start_watering_at(self: Box<Self>, when: NaiveTime) -> Box<dyn HandleMessage>;
-    fn handle_section_alarm_fired(self: Box<Self>) -> Box<dyn HandleMessage>;
-}
-pub struct AdHocWatering {}
-
-impl HandleMessage for AdHocWatering {
-    fn handle_start_watering_at(self: Box<Self>, when: NaiveTime) -> Box<dyn HandleMessage> {
-        self
-    }
-
-    fn handle_section_alarm_fired(self: Box<Self>) -> Box<dyn HandleMessage> {
-        self
-    }
-}
-
-impl HandleMessage for WateringService {
-    fn handle_start_watering_at(self: Box<Self>, when: NaiveTime) -> Box<dyn HandleMessage> {
-        info!("Setting up watering on {when}");
-        self.clock_tx
-            .send(ClockServiceMessage::SetWateringAlarmAt(when))
-            .unwrap();
-
-        Box::new(AdHocWatering {})
-    }
-
-    fn handle_section_alarm_fired(mut self: Box<Self>) -> Box<dyn HandleMessage> {
-        info!("Got notification about section alarm");
-        // This alarm should be assigned to some section
-        assert_ne!(self.current_section, Section::None);
-        self.water_next_section();
-
-        self
-    }
-}
-
 impl WateringService {
     pub fn new(clock_tx: ClockServiceChannel, sections_tx: SectionsServiceChannel) -> Self {
         Self {
@@ -116,22 +80,83 @@ impl WateringService {
         // Create Watering service
         std::thread::spawn(move || {
             log::info!("Hello from Watering service!");
-            let mut boxed: Box<dyn HandleMessage> = Box::new(self);
 
             while let Ok(msg) = rx.recv() {
-                log::debug!("Handling {msg:?}");
-
-                boxed = match msg {
-                    WateringServiceMessage::SectionAlarmFired => boxed.handle_section_alarm_fired(),
-                    WateringServiceMessage::StartWateringAt(when) => {
-                        boxed.handle_start_watering_at(when)
-                    }
-                    _ => todo!(),
-                };
+                self.handle_msg(msg)
             }
         });
 
         tx
+    }
+
+    fn handle_msg(&mut self, msg: WateringServiceMessage) {
+        log::debug!("Handling {msg:?}");
+
+        match msg {
+            WateringServiceMessage::SectionAlarmFired => {
+                info!("Got notification about section alarm");
+
+                if self.out_of_schedule_watering != Section::None {
+                    self.close_all_valves();
+                    self.disable_section_alarm();
+                    self.out_of_schedule_watering = Section::None;
+                    return;
+                }
+
+                // This alarm should be assigned to some section
+                assert_ne!(self.current_section, Section::None);
+                self.water_next_section()
+            }
+            WateringServiceMessage::WateringAlarmFired => {
+                info!("Got notification about watering alarm");
+                // TODO: Sanity call
+                // self.close_all_valves();
+
+                // TODO: out of schedule watering
+                // start watchdog
+
+                // There should be no watering in progress
+                assert_eq!(self.current_section, Section::None);
+
+                self.water_next_section()
+            }
+            WateringServiceMessage::StartWateringAt(when) => {
+                info!("Setting up watering on {when}");
+                self.clock_tx
+                    .send(ClockServiceMessage::SetWateringAlarmAt(when))
+                    .unwrap();
+            }
+            WateringServiceMessage::SetSectionDuration(section, duration) => {
+                info!("Setting up section {section:?} for {duration}");
+                let _ = self.section_durations.insert(section, duration);
+            }
+            WateringServiceMessage::EnableSectionFor(section, duration) => {
+                info!("Ad-hoc watering of {section:?}");
+
+                if self.out_of_schedule_watering != Section::None {
+                    self.close_all_valves();
+                }
+
+                if duration.is_zero() {
+                    self.close_all_valves();
+                    self.disable_section_alarm();
+                }
+
+                self.set_section_alarm(&duration);
+                self.out_of_schedule_watering = section;
+            }
+            WateringServiceMessage::CloseAllValves => {
+                self.close_all_valves();
+            }
+            WateringServiceMessage::DisableWatering => self.disable_watering_alarm(),
+            WateringServiceMessage::GetStatus(tx) => {
+                let status = WateringStatus {
+                    section_durations: self.section_durations.clone(),
+                };
+                log::info!("Reporting watering status {status:#?}");
+                tx.send(status).unwrap();
+            }
+        }
     }
 
     fn close_all_valves(&mut self) {
